@@ -1,0 +1,47 @@
+name: Windows ARM SEH diagnostics
+
+# Experimental: runs only on this branch (never on master or PRs) to find
+# out why windows-11-arm dies with 0xC0000005 in core/kernel/kernel-tests
+# at [ f 0 alien-unsigned-1 ] [ vm-error? ] must-fail-with.
+
+on:
+  push:
+    branches: [ win-arm-seh-diagnostics ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag-windows-arm:
+    runs-on: windows-11-arm
+    steps:
+    - uses: actions/checkout@v4
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: arm64
+    - name: build
+      shell: cmd
+      run: build.cmd compile
+    - name: bootstrap
+      run: |
+           .\build.cmd update-boot-image
+           .\build.cmd bootstrap
+    - name: null read in optimized code
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor misc\win-arm-diag\null-compiled.factor
+        echo exit code %ERRORLEVEL%
+    - name: null read in C++ primitive
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor misc\win-arm-diag\null-primitive.factor
+        echo exit code %ERRORLEVEL%
+    - name: kernel tests
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor -e="USING: tools.test ; \"kernel\" test"
+        echo exit code %ERRORLEVEL%

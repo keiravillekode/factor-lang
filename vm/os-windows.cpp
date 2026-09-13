@@ -247,9 +247,29 @@ LONG factor_vm::exception_handler(PEXCEPTION_RECORD e, void* frame, PCONTEXT c,
 VM_C_API LONG exception_handler(PEXCEPTION_RECORD e, void* frame, PCONTEXT c,
                                 void* dispatch) {
   factor_vm* vm = current_vm_p();
+#ifdef FACTOR_ARM64
+  fprintf(stderr,
+          "[win-arm-diag] exception_handler entered code=0x%08lx pc=0x%llx sp=0x%llx "
+          "lr=0x%llx vm=%p fatal_erroring=%d\n",
+          (unsigned long)e->ExceptionCode, (unsigned long long)c->Pc,
+          (unsigned long long)c->Sp, (unsigned long long)c->Lr, (void*)vm,
+          (int)factor_vm::fatal_erroring_p);
+  fflush(stderr);
+#endif
   if (factor_vm::fatal_erroring_p || !vm)
     return ExceptionContinueSearch;
+#ifdef FACTOR_ARM64
+  LONG result = vm->exception_handler(e, frame, c, dispatch);
+  fprintf(stderr,
+          "[win-arm-diag] exception_handler returning %ld, redirect pc=0x%llx "
+          "sp=0x%llx lr=0x%llx signal_resumable=%d\n",
+          (long)result, (unsigned long long)c->Pc, (unsigned long long)c->Sp,
+          (unsigned long long)c->Lr, (int)vm->signal_resumable);
+  fflush(stderr);
+  return result;
+#else
   return vm->exception_handler(e, frame, c, dispatch);
+#endif
 }
 
 // On Unix SIGINT (ctrl-c) automatically interrupts blocking io system

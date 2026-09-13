@@ -24,6 +24,59 @@ static void arm64_store_handler_trampoline(DWORD* code, cell handler) {
   memcpy(&code[2], &handler, sizeof(cell));
 }
 
+// --- win-arm-diag: temporary diagnostics for the windows-11-arm CI crash in
+// kernel-tests ([ f 0 alien-unsigned-1 ] [ vm-error? ] must-fail-with). ---
+
+static LONG CALLBACK win_arm_diag_veh(PEXCEPTION_POINTERS p) {
+  static int count = 0;
+  if (count >= 25)
+    return EXCEPTION_CONTINUE_SEARCH;
+  count++;
+
+  PEXCEPTION_RECORD e = p->ExceptionRecord;
+  PCONTEXT c = p->ContextRecord;
+  factor_vm* vm = current_vm_p();
+
+  int pc_in_code_heap = vm && vm->code && vm->code->seg->in_segment_p((cell)c->Pc);
+  int lr_in_code_heap = vm && vm->code && vm->code->seg->in_segment_p((cell)c->Lr);
+
+  DWORD64 pc_base = 0;
+  PRUNTIME_FUNCTION pc_fn = RtlLookupFunctionEntry(c->Pc, &pc_base, NULL);
+  DWORD64 lr_base = 0;
+  PRUNTIME_FUNCTION lr_fn = RtlLookupFunctionEntry(c->Lr, &lr_base, NULL);
+
+  ULONG_PTR stack_low = 0, stack_high = 0;
+  GetCurrentThreadStackLimits(&stack_low, &stack_high);
+
+  fprintf(stderr,
+          "[win-arm-diag] VEH #%d code=0x%08lx flags=0x%lx addr=%p "
+          "access=%llu target=0x%llx\n"
+          "[win-arm-diag]   pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx "
+          "pc_in_code_heap=%d lr_in_code_heap=%d\n"
+          "[win-arm-diag]   RtlLookupFunctionEntry(pc)=%p base=0x%llx begin=0x%lx"
+          " | (lr)=%p base=0x%llx begin=0x%lx\n"
+          "[win-arm-diag]   thread stack=[0x%llx,0x%llx) factor callstack=[0x%llx,0x%llx)"
+          " code heap=[0x%llx,0x%llx)\n",
+          count, (unsigned long)e->ExceptionCode, (unsigned long)e->ExceptionFlags,
+          e->ExceptionAddress,
+          (unsigned long long)(e->NumberParameters > 0 ? e->ExceptionInformation[0] : 0),
+          (unsigned long long)(e->NumberParameters > 1 ? e->ExceptionInformation[1] : 0),
+          (unsigned long long)c->Pc, (unsigned long long)c->Sp,
+          (unsigned long long)c->Fp, (unsigned long long)c->Lr,
+          pc_in_code_heap, lr_in_code_heap,
+          (void*)pc_fn, (unsigned long long)pc_base,
+          (unsigned long)(pc_fn ? pc_fn->BeginAddress : 0),
+          (void*)lr_fn, (unsigned long long)lr_base,
+          (unsigned long)(lr_fn ? lr_fn->BeginAddress : 0),
+          (unsigned long long)stack_low, (unsigned long long)stack_high,
+          (unsigned long long)(vm && vm->ctx ? vm->ctx->callstack_seg->start : 0),
+          (unsigned long long)(vm && vm->ctx ? vm->ctx->callstack_seg->end : 0),
+          (unsigned long long)(vm && vm->code ? vm->code->seg->start : 0),
+          (unsigned long long)(vm && vm->code ? vm->code->seg->end : 0));
+  fflush(stderr);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void factor_vm::c_to_factor_toplevel(cell quot) {
   arm64_seh_data* seh_area = (arm64_seh_data*)code->seh_area;
   cell base = code->seg->start;
@@ -57,7 +110,26 @@ void factor_vm::c_to_factor_toplevel(cell quot) {
   factor::flush_icache((cell)&seh_area->handler[0],
                        sizeof(seh_area->handler));
 
-  if (!RtlAddFunctionTable(seh_area->funcs, entry_count, base))
+  static bool win_arm_diag_veh_installed = false;
+  if (!win_arm_diag_veh_installed) {
+    AddVectoredExceptionHandler(1, win_arm_diag_veh);
+    win_arm_diag_veh_installed = true;
+  }
+
+  BOOLEAN added = RtlAddFunctionTable(seh_area->funcs, entry_count, base);
+  fprintf(stderr,
+          "[win-arm-diag] RtlAddFunctionTable=%d base=0x%llx start=0x%llx end=0x%llx "
+          "entries=%lu handler=0x%llx exception_handler=%p "
+          "unwind[0].header=0x%08lx unwind_codes=0x%08lx handler_rva=0x%lx "
+          "funcs[0].begin=0x%lx\n",
+          (int)added, (unsigned long long)base, (unsigned long long)start,
+          (unsigned long long)end, (unsigned long)entry_count,
+          (unsigned long long)(base + handler_rva), (void*)&factor::exception_handler,
+          (unsigned long)seh_area->unwind[0].header,
+          (unsigned long)seh_area->unwind[0].unwind_codes,
+          (unsigned long)handler_rva, (unsigned long)seh_area->funcs[0].BeginAddress);
+  fflush(stderr);
+  if (!added)
     fatal_error("RtlAddFunctionTable() failed", 0);
 
   c_to_factor(quot);

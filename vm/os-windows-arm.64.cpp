@@ -28,6 +28,10 @@ static void arm64_store_handler_trampoline(DWORD* code, cell handler) {
 // kernel-tests ([ f 0 alien-unsigned-1 ] [ vm-error? ] must-fail-with). ---
 
 static LONG CALLBACK win_arm_diag_veh(PEXCEPTION_POINTERS p) {
+  // MSVC C++ exceptions (0xe06d7363) are routine inside the VM; don't let
+  // them use up the log budget.
+  if (p->ExceptionRecord->ExceptionCode == 0xe06d7363)
+    return EXCEPTION_CONTINUE_SEARCH;
   static int count = 0;
   if (count >= 25)
     return EXCEPTION_CONTINUE_SEARCH;
@@ -73,6 +77,56 @@ static LONG CALLBACK win_arm_diag_veh(PEXCEPTION_POINTERS p) {
           (unsigned long long)(vm && vm->ctx ? vm->ctx->callstack_seg->end : 0),
           (unsigned long long)(vm && vm->code ? vm->code->seg->start : 0),
           (unsigned long long)(vm && vm->code ? vm->code->seg->end : 0));
+
+  NT_TIB* tib = (NT_TIB*)NtCurrentTeb();
+  fprintf(stderr, "[win-arm-diag]   TEB StackBase=%p StackLimit=%p\n",
+          tib->StackBase, tib->StackLimit);
+
+  // Repeat the dispatcher's frame walk from the fault context: for each frame,
+  // is there a function entry, what does RtlVirtualUnwind produce, and is a
+  // handler attached? Stops at the first code-heap frame (where Factor's
+  // exception_handler is registered) or when the walk stops making progress.
+  if (!pc_in_code_heap) {
+    CONTEXT walk = *c;
+    for (int frame = 0; frame < 12; frame++) {
+      int in_code = vm && vm->code && vm->code->seg->in_segment_p((cell)walk.Pc);
+      DWORD64 base = 0;
+      PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(walk.Pc, &base, NULL);
+      fprintf(stderr,
+              "[win-arm-diag]   walk[%d] pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx "
+              "in_code_heap=%d entry=%p base=0x%llx begin=0x%lx\n",
+              frame, (unsigned long long)walk.Pc, (unsigned long long)walk.Sp,
+              (unsigned long long)walk.Fp, (unsigned long long)walk.Lr, in_code,
+              (void*)fn, (unsigned long long)base,
+              (unsigned long)(fn ? fn->BeginAddress : 0));
+      if (in_code) {
+        fprintf(stderr, "[win-arm-diag]   walk reached the code heap\n");
+        break;
+      }
+      DWORD64 prev_pc = walk.Pc, prev_sp = walk.Sp;
+      if (!fn) {
+        // No unwind data: the dispatcher treats it as a leaf, pc <- lr.
+        walk.Pc = walk.Lr;
+        fprintf(stderr, "[win-arm-diag]   walk[%d] no function entry, leaf rule pc<-lr\n",
+                frame);
+      } else {
+        PVOID handler_data = NULL;
+        DWORD64 establisher = 0;
+        PEXCEPTION_ROUTINE handler =
+            RtlVirtualUnwind(UNW_FLAG_EHANDLER, base, prev_pc, fn, &walk,
+                             &handler_data, &establisher, NULL);
+        fprintf(stderr,
+                "[win-arm-diag]   walk[%d] unwound: establisher=0x%llx handler=%p "
+                "-> pc=0x%llx sp=0x%llx\n",
+                frame, (unsigned long long)establisher, (void*)handler,
+                (unsigned long long)walk.Pc, (unsigned long long)walk.Sp);
+      }
+      if (walk.Pc == 0 || (walk.Pc == prev_pc && walk.Sp == prev_sp)) {
+        fprintf(stderr, "[win-arm-diag]   walk stopped: no progress\n");
+        break;
+      }
+    }
+  }
   fflush(stderr);
   return EXCEPTION_CONTINUE_SEARCH;
 }

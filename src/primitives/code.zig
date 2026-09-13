@@ -106,8 +106,11 @@ pub export fn primitive_modify_code_heap(vm_asm: *VMAssemblyFields) callconv(.c)
                 if (word_after.pic_def != layouts.false_object) {
                     vm.jitCompileQuotation(word_after.pic_def, false);
                 }
-                if (word_after.pic_tail_def != layouts.false_object) {
-                    vm.jitCompileQuotation(word_after.pic_tail_def, false);
+                // jitCompileQuotation(pic_def) above can GC and move the word,
+                // so re-derive it from the root before reading pic_tail_def.
+                const word_tail: *layouts.Word = @ptrFromInt(layouts.UNTAG(rooted_word));
+                if (word_tail.pic_tail_def != layouts.false_object) {
+                    vm.jitCompileQuotation(word_tail.pic_tail_def, false);
                 }
             },
             .array => {

@@ -110,6 +110,15 @@ code_block* code_heap::code_block_for_address(cell address) {
   return found_block;
 }
 
+code_block* code_heap::code_block_for_address_range(cell address,
+                                                    cell* range_end) {
+  std::set<cell>::const_iterator blocki = all_blocks.upper_bound(address);
+  *range_end = blocki == all_blocks.end() ? seg->end : *blocki;
+  FACTOR_ASSERT(blocki != all_blocks.begin());
+  --blocki;
+  return (code_block*)*blocki;
+}
+
 cell code_heap::frame_predecessor(cell frame_top) {
 #ifdef FACTOR_ARM64
   return *(cell*)frame_top;

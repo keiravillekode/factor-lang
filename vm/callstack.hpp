@@ -62,6 +62,10 @@ void factor_vm::iterate_callstack(context* ctx, Iterator& iterator,
 
   cell top = ctx->callstack_top;
   cell bottom = ctx->callstack_bottom;
+  // Consecutive frames often share an owner (recursion); skip the
+  // all_blocks tree lookup while the return address stays in its range.
+  code_block* cached_owner = NULL;
+  cell cached_start = 1, cached_end = 0;
   // When we are translating the code block maps, all callstacks must
   // be empty.
   FACTOR_ASSERT(!Fixup::translated_code_block_map || top == bottom);
@@ -73,7 +77,14 @@ void factor_vm::iterate_callstack(context* ctx, Iterator& iterator,
 
     // Only the address is valid, if the code heap has been compacted,
     // owner might not point to a real code block.
-    code_block* owner = code->code_block_for_address(addr);
+    code_block* owner;
+    if (addr >= cached_start && addr < cached_end) {
+      owner = cached_owner;
+    } else {
+      owner = code->code_block_for_address_range(addr, &cached_end);
+      cached_owner = owner;
+      cached_start = (cell)owner;
+    }
     fixup.translate_code(owner);
 
     cell size = *(cell*)top - top;
@@ -88,7 +99,14 @@ void factor_vm::iterate_callstack(context* ctx, Iterator& iterator,
 
     // Only the address is valid, if the code heap has been compacted,
     // owner might not point to a real code block.
-    code_block* owner = code->code_block_for_address(addr);
+    code_block* owner;
+    if (addr >= cached_start && addr < cached_end) {
+      owner = cached_owner;
+    } else {
+      owner = code->code_block_for_address_range(addr, &cached_end);
+      cached_owner = owner;
+      cached_start = (cell)owner;
+    }
     code_block* fixed_owner = fixup.translate_code(owner);
 
     cell delta = addr - (cell)owner - sizeof(code_block);

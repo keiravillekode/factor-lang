@@ -125,6 +125,9 @@ struct code_heap {
   void sweep();
 
   code_block* code_block_for_address(cell address);
+  // Like code_block_for_address, but also returns the start of the next
+  // block (or the segment end) using all_blocks only, never block headers.
+  code_block* code_block_for_address_range(cell address, cell* range_end);
   cell frame_predecessor(cell frame_top);
 
   bool safepoint_p(cell addr) {

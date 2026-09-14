@@ -196,10 +196,29 @@ These ran in a separate checkout, before the harness moved into the branch:
 - After the fixes: extended stress seeds 7000–7149, Debug stress seeds
   4000–4059 and verifier seeds 2000–2099 all came back clean.
 
-That checkout also carried extra hardening assertions that are not on this
-branch: a root-stack canary, loud `untagFixnumUnsigned` and
-forwarding-chain traps, and `assertPendingFlushed`. The results in the
-recipes table were reproduced without them.
+That checkout also carried extra hardening assertions, which are not on the
+fuzzing branch. They are on their own branch,
+[`zig-vm-hardening-assertions`](https://github.com/keiravillekode/factor-lang/tree/zig-vm-hardening-assertions)
+(off `master`):
+
+- a root-stack canary at every GC entry: data-root capacity overflow in all
+  build modes, and every root validated in Debug builds;
+- `untagFixnumUnsigned` panics on a non-fixnum instead of returning 0; the
+  low-level debugger uses a tolerant variant;
+- `followForwardingPointers` panics on a chain of 16 or more hops instead
+  of silently stopping;
+- `assertPendingFlushed` in the compaction callstack walkers.
+
+The branch is based on `master`, so it does not include the three fixes: its
+ReleaseSafe VM still hits the `resetTenuredCards` overflow (7/24 plain seeds
+crashed with `integer overflow`, Debug 24/24 passed). Merged onto
+`zig-vm-fuzzing` it passes: 48/48 plain runs and 12/12 with
+`-gc-zeal=100 -gc-zeal-code=25 -nursery-budget=128`. That merge conflicts in
+`src/gc.zig`, where both branches add lines at the start of `gc()` and
+`collectGrowingDataHeap`; keep both, the canary call and then
+`hook_depth += 1; defer hook_depth -= 1;`.
+
+The results in the recipes table were reproduced without these assertions.
 
 Two differences were noted but not fixed:
 

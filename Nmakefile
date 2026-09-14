@@ -157,8 +157,9 @@ all: factor.com.manifest factor.exe.manifest factor.dll.lib libfactor-ffi-test.d
 .c.obj::
 	cl /EHsc $(CL_FLAGS) /MP /Fovm/ /c $<
 
-vm\cpu-arm.64-trampoline.obj:
-	armasm64 -nologo vm\cpu-arm.64-trampoline.asm $@
+vm\cpu-arm.64-trampoline.obj: vm\cpu-arm.64-trampoline.asm
+	cl /nologo /P /EP /TC /Fivm\cpu-arm.64-trampoline.i.asm vm\cpu-arm.64-trampoline.asm
+	armasm64 -nologo vm\cpu-arm.64-trampoline.i.asm $@
 
 .asm.obj:
 	ml $(ML_FLAGS) /Fo$@ /c $<

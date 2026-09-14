@@ -6,7 +6,7 @@ name: Windows ARM SEH diagnostics
 
 on:
   push:
-    branches: [ win-arm-seh-diagnostics, win-arm-seh-option1-unwind-annotations, win-arm-seh-option2-code-heap-trampolines ]
+    branches: [ 'win-arm-seh-**' ]
   workflow_dispatch:
 
 permissions:
@@ -44,4 +44,22 @@ jobs:
       shell: cmd
       run: |
         factor -e="USING: tools.test ; \"kernel\" test"
+        echo exit code %ERRORLEVEL%
+    - name: FFI fault through trampoline (1 argument)
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor misc\win-arm-diag\ffi-read-trampoline.factor
+        echo exit code %ERRORLEVEL%
+    - name: FFI fault through trampoline2 (9 arguments, one on the stack)
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor misc\win-arm-diag\ffi-read-trampoline2.factor
+        echo exit code %ERRORLEVEL%
+    - name: alien-indirect to address 0 through trampoline2 (9 arguments)
+      continue-on-error: true
+      shell: cmd
+      run: |
+        factor misc\win-arm-diag\ffi-null-indirect-trampoline2.factor
         echo exit code %ERRORLEVEL%

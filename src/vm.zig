@@ -255,6 +255,19 @@ pub const FactorVM = struct {
     signal_pipe_input: i32,
     signal_pipe_output: i32,
     gc_off: bool,
+    // GC stress/verification knobs (fuzzing; image.zig VMParameters). 0 = off.
+    gc_zeal: Cell,
+    gc_zeal_countdown: Cell,
+    gc_zeal_code: Cell,
+    gc_zeal_code_countdown: Cell,
+    nursery_budget: Cell,
+    // nursery.here as left by the last budget application; equal to the
+    // current here only while nothing has been allocated since that GC.
+    nursery_budget_mark: Cell,
+    // End of the current ensureNurserySpace reservation; zeal never collects
+    // inside it (the caller was promised no GC). Reset by every collection.
+    zeal_reserved_end: Cell,
+    verify_heap: Cell,
     data: ?*DataHeap,
     code: ?*CodeHeap,
     callbacks: ?*CallbackHeap,
@@ -323,6 +336,14 @@ pub const FactorVM = struct {
             .signal_pipe_input = -1,
             .signal_pipe_output = -1,
             .gc_off = false,
+            .gc_zeal = 0,
+            .gc_zeal_countdown = 0,
+            .gc_zeal_code = 0,
+            .gc_zeal_code_countdown = 0,
+            .nursery_budget = 0,
+            .nursery_budget_mark = 0,
+            .zeal_reserved_end = 0,
+            .verify_heap = 0,
             .data = null,
             .code = null,
             .callbacks = null,
@@ -930,6 +951,11 @@ pub const FactorVM = struct {
 
         const aligned_size = layouts.alignCell(size, layouts.data_alignment);
 
+        if (self.gc_zeal != 0) {
+            @branchHint(.unlikely);
+            self.gcZealTick(aligned_size);
+        }
+
         const addr = self.vm_asm.nursery.here;
         const new_here = addr + aligned_size;
         if (new_here <= self.vm_asm.nursery.end) {
@@ -942,12 +968,56 @@ pub const FactorVM = struct {
         return self.allotObjectSlow(type_tag, size, aligned_size);
     }
 
+    // -gc-zeal=N: run a nursery collection before every Nth VM-side
+    // allocation, so a pointer held unrooted (or not re-derived) across any
+    // allocation is invalidated at once instead of only when the nursery
+    // happens to fill. Allocations inside an ensureNurserySpace reservation
+    // are exempt: that reservation is an explicit no-GC promise (JIT.init).
+    noinline fn gcZealTick(self: *Self, aligned_size: Cell) void {
+        if (self.vm_asm.nursery.here + aligned_size <= self.zeal_reserved_end) return;
+        self.gc_zeal_countdown -|= 1;
+        if (self.gc_zeal_countdown != 0) return;
+        self.gc_zeal_countdown = self.gc_zeal;
+        if (self.gc == null) return;
+        self.minorGc();
+    }
+
+    // -nursery-budget: GarbageCollector.afterCollection pre-consumes the
+    // empty nursery so compiled code overflows into minor_gc after `budget`
+    // bytes. Nothing lives below the mark, so a VM-side request that does not
+    // fit may reclaim the whole nursery — but only if nothing was allocated
+    // since that collection (here still at the mark); a no-op minorGc under
+    // gc_off must never discard live objects.
+    fn releaseNurseryBudget(self: *Self, aligned_size: Cell) void {
+        const nursery = &self.vm_asm.nursery;
+        if (self.nursery_budget == 0 or nursery.here != self.nursery_budget_mark) return;
+        if (nursery.here + aligned_size <= nursery.end) return;
+        nursery.here = nursery.start;
+        self.nursery_budget_mark = 0;
+    }
+
+    // -gc-zeal-code=N: run the compacting collection that code-heap exhaustion
+    // triggers (allotCodeBlock below) before every Nth code block allocation,
+    // so JIT/PIC paths holding data or code pointers across allotCodeBlock
+    // meet moved objects and blocks routinely, not only when the heap fills.
+    noinline fn codeZealTick(self: *Self) void {
+        self.gc_zeal_code_countdown -|= 1;
+        if (self.gc_zeal_code_countdown != 0) return;
+        self.gc_zeal_code_countdown = self.gc_zeal_code;
+        if (self.gc_off) return;
+        const gc_instance = self.gc orelse return;
+        self.current_gc_p = true;
+        defer self.current_gc_p = false;
+        gc_instance.collect(.collect_compact);
+    }
+
     noinline fn allotObjectSlow(self: *Self, type_tag: layouts.TypeTag, size: Cell, aligned_size: Cell) ?Cell {
         if (aligned_size >= self.vm_asm.nursery.size) {
             return self.allotLargeObject(type_tag, size);
         }
 
         self.minorGc();
+        self.releaseNurseryBudget(aligned_size);
 
         const addr = self.vm_asm.nursery.here;
         const new_here = addr + aligned_size;
@@ -961,6 +1031,11 @@ pub const FactorVM = struct {
     }
 
     pub fn allotCodeBlock(self: *Self, size: Cell) *code_blocks_mod.CodeBlock {
+        if (self.gc_zeal_code != 0) {
+            @branchHint(.unlikely);
+            self.codeZealTick();
+        }
+
         const code_heap = self.code orelse @panic("code heap not initialized");
 
         if (code_heap.allocate(size)) |block| {
@@ -1009,6 +1084,7 @@ pub const FactorVM = struct {
             defer self.current_gc_p = false;
             gc_instance.gc(.collect_nursery) catch {
                 gc_instance.collectFull(true);
+                gc_instance.afterCollection();
             };
         }
     }
@@ -1028,13 +1104,16 @@ pub const FactorVM = struct {
         return (top - seg.start) < segments.Segment.gc_stack_headroom;
     }
 
+    /// Reserve `size` nursery bytes that the caller may then allocate with no
+    /// intervening GC (-gc-zeal honors the reservation).
     pub fn ensureNurserySpace(self: *Self, size: Cell) bool {
-        if (self.vm_asm.nursery.here + size <= self.vm_asm.nursery.end) {
-            return true; // Space available
+        if (self.vm_asm.nursery.here + size > self.vm_asm.nursery.end) {
+            self.minorGc();
+            self.releaseNurseryBudget(size);
+            if (self.vm_asm.nursery.here + size > self.vm_asm.nursery.end) return false;
         }
-
-        self.minorGc();
-        return self.vm_asm.nursery.here + size <= self.vm_asm.nursery.end;
+        self.zeal_reserved_end = self.vm_asm.nursery.here + size;
+        return true;
     }
 
     pub fn lazyJitCompileEntryPoint(self: *const Self) Cell {

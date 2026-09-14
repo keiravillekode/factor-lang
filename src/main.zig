@@ -410,6 +410,7 @@ pub fn main(init: std.process.Init) !void {
             \\  [-young=N] [-aging=N] [-tenured=N] [-codeheap=N] (megabytes)
             \\  [-callbacks=N]  (kilobytes)
             \\  [-pic=N] [-no-signals]
+            \\  [-gc-zeal=N] [-gc-zeal-code=N] [-nursery-budget=N] [-verify-heap[=N]]  (GC stress)
             \\
         , .{});
         std.process.exit(1);
@@ -446,6 +447,10 @@ pub fn main(init: std.process.Init) !void {
     vm.callstack_size = params.callstack_size;
     vm.callback_size = params.callback_size;
     vm.max_pic_size = params.max_pic_size;
+    vm.gc_zeal = params.gc_zeal;
+    vm.gc_zeal_code = params.gc_zeal_code;
+    vm.nursery_budget = params.nursery_budget;
+    vm.verify_heap = params.verify_heap;
 
     // Create initial context and spare context (for callbacks)
     const ctx = try vm.newContext();

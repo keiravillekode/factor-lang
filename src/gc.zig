@@ -13,6 +13,7 @@ const compact = @import("compact.zig");
 const jit_protect = @import("jit_protect.zig");
 const mark_mod = @import("mark.zig");
 const sweep_mod = @import("sweep.zig");
+const verify_heap = @import("verify_heap.zig");
 const write_barrier = @import("write_barrier.zig");
 
 const Cell = layouts.Cell;
@@ -46,6 +47,12 @@ pub const GarbageCollector = struct {
     current_event: ?*vm_mod.GCEvent = null,
     event_storage: vm_mod.GCEvent = undefined,
 
+    // Nesting depth of gc()/collectGrowingDataHeap, so afterCollection hooks
+    // run once, when the outermost collection finishes.
+    hook_depth: u32 = 0,
+    verify_countdown: Cell = 0,
+    verifications: Cell = 0,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, vm: *FactorVM, heap: *DataHeap) Self {
@@ -71,6 +78,9 @@ pub const GarbageCollector = struct {
         // the direct gc() callers (allotObjectSlow / allotLargeObject).
         var jit_scope = jit_protect.Scope.init();
         defer jit_scope.deinit();
+
+        self.hook_depth += 1;
+        defer self.hook_depth -= 1;
 
         var current_op = op;
 
@@ -139,6 +149,39 @@ pub const GarbageCollector = struct {
                     return error.GCFailed;
                 },
             };
+        }
+
+        if (self.hook_depth == 1) self.afterCollection();
+    }
+
+    // Post-collection stress/verification hooks (fuzzing knobs, off by
+    // default). Called when the outermost gc()/collectGrowingDataHeap
+    // finishes — they nest and escalate internally, and neither the verifier
+    // nor the nursery budget may run against a half-finished collection.
+    pub fn afterCollection(self: *Self) void {
+        const vm = self.vm;
+        vm.zeal_reserved_end = 0;
+
+        if (vm.verify_heap != 0) {
+            self.verify_countdown -|= 1;
+            if (self.verify_countdown == 0) {
+                self.verify_countdown = vm.verify_heap;
+                verify_heap.verify(self);
+            }
+        }
+
+        // -nursery-budget: pre-consume the empty nursery so compiled code's
+        // inline allocation check fails, and calls minor_gc, after only
+        // `budget` bytes. Moving `here` instead of shrinking `end` keeps every
+        // nursery range test exact (write barrier, copy source bounds); the
+        // skipped prefix holds no objects and only the debugger walks it.
+        if (vm.nursery_budget != 0) {
+            const nursery = &vm.vm_asm.nursery;
+            if (nursery.here == nursery.start and vm.nursery_budget < nursery.size) {
+                nursery.here = nursery.end - vm.nursery_budget;
+                self.heap.nursery.here = nursery.here;
+                vm.nursery_budget_mark = nursery.here;
+            }
         }
     }
 
@@ -484,6 +527,8 @@ pub const GarbageCollector = struct {
     pub fn collectGrowingDataHeap(self: *Self, requested_size: Cell) !void {
         var jit_scope = jit_protect.Scope.init();
         defer jit_scope.deinit();
+        self.hook_depth += 1;
+        defer self.hook_depth -= 1;
         const old_heap = self.heap;
 
         old_heap.nursery.here = self.vm.vm_asm.nursery.here;
@@ -541,6 +586,8 @@ pub const GarbageCollector = struct {
         self.updateCodeBlockExternalRelocations();
 
         self.freeOldHeap(old_heap);
+
+        if (self.hook_depth == 1) self.afterCollection();
     }
     fn updateCodeBlockExternalRelocations(self: *Self) void {
         const code = self.vm.code orelse return;

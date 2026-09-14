@@ -138,6 +138,20 @@ pub const VMParameters = struct {
     max_pic_size: Cell = 3,
     callback_size: Cell = alignPageBytes(256 * 1024), // 256KB
 
+    // GC stress/verification knobs for fuzzing (Zig VM only; 0 = off). See
+    // vm.zig gcZealTick / releaseNurseryBudget and verify_heap.zig.
+    gc_zeal: Cell = 0, // -gc-zeal=N: nursery GC before every Nth VM-side allocation
+    gc_zeal_code: Cell = 0, // -gc-zeal-code=N: compacting GC before every Nth code block allocation
+    nursery_budget: Cell = 0, // -nursery-budget=N (kilobytes, min 64): usable nursery after each GC
+    verify_heap: Cell = 0, // -verify-heap[=N]: verify the heap after every Nth GC
+
+    /// Smallest -nursery-budget. Compiled code checks the nursery once per
+    /// allocation-batching section (split at every call) and then bumps without
+    /// re-checking; inline allocations are bounded (arrays ≤ 8 elements, byte
+    /// arrays ≤ 1024 bytes — compiler.cfg.intrinsics.allot), so 64 KB leaves a
+    /// wide margin for any single section after minor_gc returns.
+    pub const min_nursery_budget: Cell = 64 * 1024;
+
     /// Parse C++-compatible heap/runtime flags from argv.
     /// Stops at `--`. Unknown flags (e.g. `-e=`, `-run=`) are left for Factor.
     /// Returns the `-i=` image path if present.
@@ -149,7 +163,17 @@ pub const VMParameters = struct {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--")) break;
 
-            if (parseUsizeFlag(arg, "-datastack=")) |n| {
+            if (parseUsizeFlag(arg, "-gc-zeal=")) |n| {
+                self.gc_zeal = n;
+            } else if (parseUsizeFlag(arg, "-gc-zeal-code=")) |n| {
+                self.gc_zeal_code = n;
+            } else if (parseUsizeFlag(arg, "-nursery-budget=")) |n| {
+                self.nursery_budget = if (n == 0) 0 else @max(n << 10, min_nursery_budget);
+            } else if (parseUsizeFlag(arg, "-verify-heap=")) |n| {
+                self.verify_heap = n;
+            } else if (std.mem.eql(u8, arg, "-verify-heap")) {
+                self.verify_heap = 1;
+            } else if (parseUsizeFlag(arg, "-datastack=")) |n| {
                 self.datastack_size = alignPageBytes(n << 10);
             } else if (parseUsizeFlag(arg, "-retainstack=")) |n| {
                 self.retainstack_size = alignPageBytes(n << 10);

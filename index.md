@@ -35,3 +35,17 @@ It also adds GC stress flags to the Zig VM (`-gc-zeal`, `-gc-zeal-code`,
   which bug, and pitfalls. It is not `zig build --fuzz`.
 
 **[Read the guide](fuzz-testing.md)**
+
+## Zig VM: format-float returns an empty string on Linux
+
+On glibc the Zig VM's `(format-float)` returns an empty byte-array for
+every call, so `sprintf` with `%f` or `%e` fails, and 41 `formatting`
+tests fail. The C++ VM is unaffected.
+
+- **Cause:** the Linux `LC_ALL_MASK` in `src/primitives/math.zig` is
+  `0xFFF`, which glibc's `newlocale` rejects with `EINVAL` (glibc's mask is
+  `0x1FBF`).
+- **Contents:** a reproduction, the cause, and a one-line fix on the
+  `zig-vm-format-float-locale` branch.
+
+**[Read the bug report](zig-vm-format-float-locale.md)**

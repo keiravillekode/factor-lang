@@ -254,9 +254,17 @@ cell factor_vm::lookup_external_address(relocation_type rel_type,
       return code->safepoint_page;
 #ifdef FACTOR_ARM64
     case RT_TRAMPOLINE:
+#ifdef WINDOWS
+      return arm64_trampoline_address(code->seh_area);
+#else
       return (cell)&factor::trampoline;
+#endif
     case RT_TRAMPOLINE2:
+#ifdef WINDOWS
+      return arm64_trampoline2_address(code->seh_area);
+#else
       return (cell)&factor::trampoline2;
+#endif
 #endif
     default:
       return -1;

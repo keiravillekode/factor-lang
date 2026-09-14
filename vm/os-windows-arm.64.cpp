@@ -17,6 +17,40 @@ struct arm64_seh_data {
   DWORD handler[4];
 };
 
+// Same instructions as vm/cpu-arm.64-trampoline.S. Both stubs start with the
+// fp/lr frame that arm64_unwind_code_fplr_frame describes (trampoline2 keeps
+// its frame at [x17], so the unwound sp is approximate, but fp/lr are right).
+static const DWORD arm64_trampoline_stub_code[] = {
+  // trampoline
+  0xa9bf7bfd, // stp fp, lr, [sp, #-16]!
+  0x910003fd, // mov fp, sp
+  0xf900029d, // str fp, [x20]   ; ctx.callstack_top
+  0xd63f0200, // blr x16
+  0xa8c17bfd, // ldp fp, lr, [sp], #16
+  0xd65f03c0, // ret
+  // trampoline2
+  0xa9007a3d, // stp fp, lr, [x17]
+  0xaa1103fd, // mov fp, x17
+  0xf900029d, // str fp, [x20]
+  0xd63f0200, // blr x16
+  0xa9407bbd, // ldp fp, lr, [fp]
+  0xd65f03c0, // ret
+};
+
+// Called from the code_heap constructor, before any code block is relocated
+// against RT_TRAMPOLINE/RT_TRAMPOLINE2.
+void write_arm64_trampoline_stubs(char* seh_area) {
+  if (sizeof(arm64_seh_data) > arm64_trampoline_stubs_offset ||
+      sizeof(arm64_trampoline_stub_code) != arm64_trampoline_stubs_size ||
+      arm64_trampoline_stubs_offset + arm64_trampoline_stubs_size > seh_area_size)
+    fatal_error("arm64 trampoline stubs do not fit in the SEH area",
+                sizeof(arm64_seh_data));
+  memcpy(seh_area + arm64_trampoline_stubs_offset, arm64_trampoline_stub_code,
+         sizeof(arm64_trampoline_stub_code));
+  factor::flush_icache((cell)seh_area + arm64_trampoline_stubs_offset,
+                       arm64_trampoline_stubs_size);
+}
+
 static void arm64_store_handler_trampoline(DWORD* code, cell handler) {
   // ldr x16, #8; br x16; .quad handler
   code[0] = 0x58000050;
@@ -137,7 +171,16 @@ void factor_vm::c_to_factor_toplevel(cell quot) {
   cell start = base + seh_area_size;
   cell end = code->seg->end;
   DWORD handler_rva = (DWORD)((cell)&seh_area->handler[0] - base);
-  DWORD entry_count = 0;
+  // Entry 0 covers the trampoline stubs (write_arm64_trampoline_stubs); they
+  // begin with the same fp/lr frame as Factor code, so the same unwind code
+  // and handler apply. Entries must be sorted, and the stubs lie below start.
+  seh_area->unwind[0].header =
+      (DWORD)((arm64_trampoline_stubs_size >> 2) | (1 << 20) | (1 << 27));
+  seh_area->unwind[0].unwind_codes = arm64_unwind_code_fplr_frame;
+  seh_area->unwind[0].exception_handler = handler_rva;
+  seh_area->funcs[0].BeginAddress = (DWORD)arm64_trampoline_stubs_offset;
+  seh_area->funcs[0].UnwindData = (DWORD)((cell)&seh_area->unwind[0] - base);
+  DWORD entry_count = 1;
 
   FACTOR_ASSERT(sizeof(arm64_seh_data) <= seh_area_size);
   arm64_store_handler_trampoline(

@@ -30,6 +30,9 @@ code_heap::code_heap(cell size) {
   // See os-windows-*.64.cpp for seh_area usage
   safepoint_page = safepoint_seg->start;
   seh_area = (char*)seg->start;
+#if defined(WINDOWS) && defined(FACTOR_ARM64)
+  write_arm64_trampoline_stubs(seh_area);
+#endif
 }
 
 code_heap::~code_heap() {

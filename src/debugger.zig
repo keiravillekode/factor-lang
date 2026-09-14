@@ -49,7 +49,7 @@ fn factorbugUsage(advanced: bool) void {
 fn printWord(word_ptr: *const layouts.Word) void {
     if (word_ptr.vocabulary != layouts.false_object and layouts.hasTag(word_ptr.vocabulary, .string)) {
         const vocab: *const layouts.String = @ptrFromInt(layouts.UNTAG(word_ptr.vocabulary));
-        const vocab_len = layouts.untagFixnumUnsigned(vocab.length);
+        const vocab_len = layouts.untagFixnumTolerant(vocab.length);
         const vocab_data = vocab.data();
         for (0..@min(vocab_len, 50)) |i| {
             const ch = vocab_data[i];
@@ -61,7 +61,7 @@ fn printWord(word_ptr: *const layouts.Word) void {
     }
     if (word_ptr.name != layouts.false_object and layouts.hasTag(word_ptr.name, .string)) {
         const name: *const layouts.String = @ptrFromInt(layouts.UNTAG(word_ptr.name));
-        const name_len = layouts.untagFixnumUnsigned(name.length);
+        const name_len = layouts.untagFixnumTolerant(name.length);
         const name_data = name.data();
         for (0..@min(name_len, 50)) |i| {
             const ch = name_data[i];
@@ -88,7 +88,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
             if (!layouts.hasTag(arr.capacity, .fixnum)) {
                 break :blk layouts.data_alignment;
             }
-            const cap = layouts.untagFixnumUnsigned(arr.capacity);
+            const cap = layouts.untagFixnumTolerant(arr.capacity);
             break :blk aligned(@sizeOf(layouts.Array) + cap * cell_size, layouts.data_alignment);
         },
         .byte_array => blk: {
@@ -96,7 +96,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
             if (!layouts.hasTag(ba.capacity, .fixnum)) {
                 break :blk layouts.data_alignment;
             }
-            const cap = layouts.untagFixnumUnsigned(ba.capacity);
+            const cap = layouts.untagFixnumTolerant(ba.capacity);
             break :blk aligned(@sizeOf(layouts.ByteArray) + cap, layouts.data_alignment);
         },
         .string => blk: {
@@ -104,7 +104,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
             if (!layouts.hasTag(str.length, .fixnum)) {
                 break :blk layouts.data_alignment;
             }
-            const len = layouts.untagFixnumUnsigned(str.length);
+            const len = layouts.untagFixnumTolerant(str.length);
             break :blk aligned(@sizeOf(layouts.String) + len, layouts.data_alignment);
         },
         .word => aligned(@sizeOf(layouts.Word), layouts.data_alignment),
@@ -120,7 +120,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
                 if (!layouts.hasTag(layout.size, .fixnum)) {
                     break :blk aligned(@sizeOf(layouts.Tuple), layouts.data_alignment);
                 }
-                const slot_count = layouts.untagFixnumUnsigned(layout.size);
+                const slot_count = layouts.untagFixnumTolerant(layout.size);
                 break :blk aligned(@sizeOf(layouts.Tuple) + slot_count * cell_size, layouts.data_alignment);
             }
             break :blk aligned(@sizeOf(layouts.Tuple), layouts.data_alignment);
@@ -132,7 +132,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
             if (!layouts.hasTag(cs.length, .fixnum)) {
                 break :blk layouts.data_alignment;
             }
-            const len = layouts.untagFixnumUnsigned(cs.length);
+            const len = layouts.untagFixnumTolerant(cs.length);
             break :blk aligned(@sizeOf(layouts.Callstack) + len, layouts.data_alignment);
         },
         .bignum => blk: {
@@ -140,7 +140,7 @@ fn objectSizeForDebug(obj: *const layouts.Object, obj_type: layouts.TypeTag) Cel
             if (!layouts.hasTag(bn.capacity, .fixnum)) {
                 break :blk layouts.data_alignment;
             }
-            const cap = layouts.untagFixnumUnsigned(bn.capacity);
+            const cap = layouts.untagFixnumTolerant(bn.capacity);
             break :blk aligned(@sizeOf(layouts.Bignum) + cap * cell_size, layouts.data_alignment);
         },
         else => layouts.data_alignment,
@@ -153,7 +153,7 @@ fn printCodeBlockOwner(block: *const code_blocks.CodeBlock) void {
         const word: *const layouts.Word = @ptrFromInt(layouts.UNTAG(owner));
         if (word.name != layouts.false_object and layouts.hasTag(word.name, .string)) {
             const str: *const layouts.String = @ptrFromInt(layouts.UNTAG(word.name));
-            const len = layouts.untagFixnumUnsigned(str.length);
+            const len = layouts.untagFixnumTolerant(str.length);
             const str_data = str.data();
             std.debug.print(" word: ", .{});
             for (0..@min(len, 60)) |j| {
@@ -184,7 +184,7 @@ fn parseHexAddress(addr_str: []const u8) ?Cell {
 // --- Functions that take a VM pointer ---
 
 fn printFactorString(vm: *FactorVM, str: *const layouts.String) void {
-    const len = layouts.untagFixnumUnsigned(str.length);
+    const len = layouts.untagFixnumTolerant(str.length);
     const data = str.data();
     std.debug.print("\"", .{});
     const print_len = if (len > 100 and !vm.full_output) @as(usize, 100) else len;
@@ -229,7 +229,7 @@ fn printNestedObj(vm: *FactorVM, obj: Cell, nesting: i32) void {
         .array => {
             std.debug.print("{{", .{});
             const arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(obj));
-            const arr_len = layouts.untagFixnumUnsigned(arr.capacity);
+            const arr_len = layouts.untagFixnumTolerant(arr.capacity);
             const data = arr.data();
             const print_len = if (arr_len > 10 and !vm.full_output) @as(usize, 10) else arr_len;
             for (0..print_len) |i| {
@@ -244,7 +244,7 @@ fn printNestedObj(vm: *FactorVM, obj: Cell, nesting: i32) void {
             const quot: *const layouts.Quotation = @ptrFromInt(layouts.UNTAG(obj));
             if (quot.array != layouts.false_object and layouts.hasTag(quot.array, .array)) {
                 const arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(quot.array));
-                const arr_len = layouts.untagFixnumUnsigned(arr.capacity);
+                const arr_len = layouts.untagFixnumTolerant(arr.capacity);
                 const data = arr.data();
                 const print_len = if (arr_len > 10 and !vm.full_output) @as(usize, 10) else arr_len;
                 for (0..print_len) |i| {
@@ -264,7 +264,7 @@ fn printNestedObj(vm: *FactorVM, obj: Cell, nesting: i32) void {
         .byte_array => {
             std.debug.print("B{{", .{});
             const ba: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(obj));
-            const ba_len = layouts.untagFixnumUnsigned(ba.capacity);
+            const ba_len = layouts.untagFixnumTolerant(ba.capacity);
             const data = ba.data();
             const print_len = if (ba_len > 16 and !vm.full_output) @as(usize, 16) else ba_len;
             for (0..print_len) |i| {
@@ -281,7 +281,7 @@ fn printNestedObj(vm: *FactorVM, obj: Cell, nesting: i32) void {
                 std.debug.print(" ", .{});
                 printNestedObj(vm, layout.klass, nesting - 1);
                 if (layouts.hasTag(layout.size, .fixnum)) {
-                    const slot_count = layouts.untagFixnumUnsigned(layout.size);
+                    const slot_count = layouts.untagFixnumTolerant(layout.size);
                     const print_count = if (slot_count > 10 and !vm.full_output) @as(usize, 10) else slot_count;
                     const slots = tuple.data();
                     for (0..print_count) |i| {
@@ -510,7 +510,7 @@ fn dumpObject(vm: *FactorVM, tagged_addr: Cell) void {
         },
         .array => {
             const arr: *const layouts.Array = @ptrFromInt(untagged);
-            const len = layouts.untagFixnumUnsigned(arr.capacity);
+            const len = layouts.untagFixnumTolerant(arr.capacity);
             std.debug.print("  capacity: {}\n", .{len});
             const data = arr.data();
             for (0..@min(len, 20)) |i| {
@@ -522,7 +522,7 @@ fn dumpObject(vm: *FactorVM, tagged_addr: Cell) void {
         },
         .string => {
             const str: *const layouts.String = @ptrFromInt(untagged);
-            const len = layouts.untagFixnumUnsigned(str.length);
+            const len = layouts.untagFixnumTolerant(str.length);
             std.debug.print("  length: {}\n", .{len});
             std.debug.print("  value: ", .{});
             printFactorString(vm, str);
@@ -555,7 +555,7 @@ fn dumpObject(vm: *FactorVM, tagged_addr: Cell) void {
         },
         .byte_array => {
             const ba: *const layouts.ByteArray = @ptrFromInt(untagged);
-            const len = layouts.untagFixnumUnsigned(ba.capacity);
+            const len = layouts.untagFixnumTolerant(ba.capacity);
             std.debug.print("  capacity: {}\n", .{len});
             const data = ba.data();
             std.debug.print("  first 32 bytes: ", .{});
@@ -569,7 +569,7 @@ fn dumpObject(vm: *FactorVM, tagged_addr: Cell) void {
             std.debug.print("  layout: 0x{x}\n", .{tuple.layout});
             if (layouts.hasTag(tuple.layout, .tuple)) {
                 const layout: *const layouts.TupleLayout = @ptrFromInt(layouts.UNTAG(tuple.layout));
-                const size = layouts.untagFixnumUnsigned(layout.size);
+                const size = layouts.untagFixnumTolerant(layout.size);
                 std.debug.print("  size: {}\n", .{size});
                 const slots = tuple.data();
                 for (0..@min(size, 20)) |i| {

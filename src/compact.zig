@@ -159,6 +159,7 @@ fn resetFreeListForCompaction(free_list: *free_list_mod.FreeListAllocator, free_
 
 fn fixupCallstackSlots(gc: *GC, ctx: *Context, fixup: *CompactionFixup) void {
     const code_heap = gc.vm.code orelse return;
+    code_heap.assertPendingFlushed();
     const blocks = code_heap.all_blocks_sorted.items;
     if (blocks.len == 0) return;
 
@@ -224,6 +225,7 @@ fn fixupCallstackSlots(gc: *GC, ctx: *Context, fixup: *CompactionFixup) void {
 
 fn fixupCallstackObjectSlots(gc: *GC, stack: *layouts.Callstack, fixup: *CompactionFixup) void {
     const code_heap = gc.vm.code orelse return;
+    code_heap.assertPendingFlushed();
     const blocks = code_heap.all_blocks_sorted.items;
     if (blocks.len == 0) return;
     const frame_length = layouts.untagFixnumUnsigned(stack.length);
@@ -284,6 +286,7 @@ fn fixupCallstackObjectSlots(gc: *GC, stack: *layouts.Callstack, fixup: *Compact
 
 fn fixupCallstackReturnAddresses(gc: *GC, ctx: *Context, fixup: *CompactionFixup) void {
     const code_heap = gc.vm.code orelse return;
+    code_heap.assertPendingFlushed();
     const blocks = code_heap.all_blocks_sorted.items;
     if (blocks.len == 0) return;
 
@@ -337,6 +340,7 @@ fn fixupCallstackReturnAddresses(gc: *GC, ctx: *Context, fixup: *CompactionFixup
 
 fn fixupCallstackObjectReturnAddresses(gc: *GC, stack: *layouts.Callstack, fixup: *CompactionFixup) void {
     const code_heap = gc.vm.code orelse return;
+    code_heap.assertPendingFlushed();
     const blocks = code_heap.all_blocks_sorted.items;
     if (blocks.len == 0) return;
     const frame_length = layouts.untagFixnumUnsigned(stack.length);

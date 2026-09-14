@@ -62,6 +62,39 @@ pub const GarbageCollector = struct {
         self.mark_stack.deinit(self.allocator);
     }
 
+    // Root-stack integrity canary, run at every GC entry.
+    //
+    // The rooting protocol pushes with appendAssumeCapacity against capacity
+    // reserved elsewhere by convention. In ReleaseFast an over-capacity push
+    // writes out of bounds *silently* — but it still advances items.len, so
+    // len > capacity is after-the-fact proof that some push since the last
+    // GC overflowed. One compare per GC buys detection in every build mode.
+    //
+    // Debug builds additionally validate each root: a data root must hold an
+    // immediate or a tagged pointer into the data heap. This catches stale
+    // roots (popped in the wrong order, never re-derived, or pointing at a
+    // dead stack frame) at GC entry, where the culprit is still on the
+    // native stack, instead of as unattributable heap corruption later.
+    fn checkRootStackIntegrity(self: *Self) void {
+        const roots = &self.vm.data_roots;
+        if (roots.items.len > roots.capacity) {
+            @panic("data_roots overflow: appendAssumeCapacity exceeded reserved capacity — root stack corrupt");
+        }
+        if (comptime builtin.mode == .Debug) {
+            for (roots.items) |root_ptr| {
+                const value = root_ptr.*;
+                if (layouts.isImmediate(value)) continue;
+                const untagged = layouts.UNTAG(value);
+                if (!self.heap.contains(untagged)) {
+                    std.debug.panic(
+                        "data root at 0x{x} holds 0x{x} (tag {d}) outside the data heap — stale or garbage root",
+                        .{ @intFromPtr(root_ptr), value, layouts.TAG(value) },
+                    );
+                }
+            }
+        }
+    }
+
     pub fn gc(self: *Self, op: GCOp) !void {
         // The collector writes relocated pointers back into the code heap and
         // callback heap (e.g. callback stub `owner` fields in visitAllRoots).
@@ -71,6 +104,8 @@ pub const GarbageCollector = struct {
         // the direct gc() callers (allotObjectSlow / allotLargeObject).
         var jit_scope = jit_protect.Scope.init();
         defer jit_scope.deinit();
+
+        self.checkRootStackIntegrity();
 
         var current_op = op;
 
@@ -484,6 +519,9 @@ pub const GarbageCollector = struct {
     pub fn collectGrowingDataHeap(self: *Self, requested_size: Cell) !void {
         var jit_scope = jit_protect.Scope.init();
         defer jit_scope.deinit();
+        // Reachable directly from allotLargeObject without passing through
+        // gc(), so run the canary here too (harmlessly redundant otherwise).
+        self.checkRootStackIntegrity();
         const old_heap = self.heap;
 
         old_heap.nursery.here = self.vm.vm_asm.nursery.here;

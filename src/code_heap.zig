@@ -67,6 +67,17 @@ pub const CodeHeap = struct {
         self.flushPendingSlow();
     }
 
+    // Freshness assertion for paths that binary-search or iterate
+    // all_blocks_sorted DIRECTLY, relying on a flushPending() done earlier
+    // by their caller (e.g. compactPhase's callstack walkers). A pending
+    // block missed here means a wrong owner lookup and a corrupt return
+    // address, so make the convention checkable: debug/safe builds trap at
+    // the read site instead. (codeBlockForAddress is exempt — it scans
+    // pending_blocks itself.)
+    pub fn assertPendingFlushed(self: *const Self) void {
+        std.debug.assert(self.pending_blocks.items.len == 0);
+    }
+
     fn flushPendingSlow(self: *Self) void {
         const pending = self.pending_blocks.items;
         const al = self.allocator orelse return;

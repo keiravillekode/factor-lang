@@ -89,8 +89,27 @@ pub fn untagFixnum(tagged: Cell) Fixnum {
 }
 
 // Same as untagFixnum but returns Cell (usize) - for use in sizes/indices.
-// Returns 0 for invalid inputs during GC to avoid crashing on corrupted objects.
+// Every caller reads a slot that is a tagged fixnum in a well-formed heap
+// (capacities, lengths, tuple-layout sizes), so a non-fixnum here IS heap
+// corruption. Fail loudly at the source: the old return-0 fallback made
+// objectVisitInfoFromAddress report size 0, which silently truncated heap
+// walks (card scan, sweep, image fixup) and let the corruption propagate.
+// The low-level debugger, which inspects possibly-corrupt heaps on
+// purpose, uses untagFixnumTolerant instead.
 pub fn untagFixnumUnsigned(tagged: Cell) Cell {
+    if (!hasTag(tagged, .fixnum)) {
+        std.debug.panic(
+            "untagFixnumUnsigned: non-fixnum 0x{x} (tag {d}) in a capacity/length slot — heap corruption",
+            .{ tagged, TAG(tagged) },
+        );
+    }
+    return @bitCast(@as(Fixnum, @bitCast(tagged)) >> @intCast(tag_bits));
+}
+
+// Tolerant variant for the low-level debugger (factorbug), whose whole job
+// is printing a heap that may already be corrupt: returns 0 instead of
+// panicking so inspection can continue. Not for use in VM/GC logic.
+pub fn untagFixnumTolerant(tagged: Cell) Cell {
     if (!hasTag(tagged, .fixnum)) {
         return 0;
     }
@@ -557,11 +576,20 @@ pub fn followForwardingPointers(addr: Cell) Cell {
 
     var obj: *Object = @ptrFromInt(current);
 
-    // Follow forwarding pointer chain (bounded to detect corruption)
+    // Follow forwarding pointer chain. A well-formed chain is at most a few
+    // hops (nursery→aging→tenured); 16 is unreachable except through a
+    // forwarding cycle or clobbered header, so trap instead of silently
+    // truncating (the old `break` returned the address of a forwarding
+    // pointer, handing corruption downstream).
     const max_hops = 16;
     var hops: u32 = 0;
     while (obj.isForwardingPointer()) : (hops += 1) {
-        if (hops >= max_hops) break;
+        if (hops >= max_hops) {
+            std.debug.panic(
+                "followForwardingPointers: chain exceeds {d} hops from 0x{x} — heap corruption",
+                .{ max_hops, UNTAG(addr) },
+            );
+        }
         obj = obj.forwardingPointer();
         current = @intFromPtr(obj);
     }

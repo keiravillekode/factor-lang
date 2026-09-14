@@ -805,11 +805,15 @@ extern "c" fn newlocale(category_mask: c_int, locale: [*c]const u8, base: ?*anyo
 extern "c" fn uselocale(loc: ?*anyopaque) ?*anyopaque;
 extern "c" fn freelocale(loc: ?*anyopaque) c_int;
 
-// LC_ALL_MASK is libc-specific: BSD/macOS has 6 categories (bits 0..5), glibc
-// has 12 (bits 0..11). Only used to validate the locale name, matching the way
-// std::locale(name) throws on an unknown locale.
+// LC_ALL_MASK is libc-specific. Only used to validate the locale name, matching
+// the way std::locale(name) throws on an unknown locale.
+//   BSD/macOS: categories 0..5, LC_ALL = 6, mask 0x3F.
+//   glibc/bionic: categories 0..12 but LC_ALL = 6 is not a category, mask
+//     0x1FBF; newlocale rejects bit 6 with EINVAL, which made every
+//     format-float return an empty byte-array.
+//   musl: LC_ALL_MASK is 0x7FFFFFFF.
 const lc_all_mask: c_int = switch (builtin.os.tag) {
-    .linux => 0xFFF,
+    .linux => if (builtin.abi.isMusl()) 0x7FFFFFFF else 0x1FBF,
     else => 0x3F,
 };
 

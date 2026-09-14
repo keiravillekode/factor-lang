@@ -445,4 +445,20 @@ void factor_vm::end_sampling_profiler_timer() {
 
 void abort() { ::abort(); }
 
+#ifdef FACTOR_ARM64
+// win-arm-diag: C functions that read the address passed as their last
+// argument, so a test can fault inside C code reached through trampoline
+// (1 argument) or through trampoline2 (9 arguments: arm64 passes the first
+// 8 in x0-x7, so the 9th goes on the stack and the compiler uses
+// %c-invoke-tramp2).
+VM_C_API cell win_arm_diag_read1(cell p) { return *(cell*)p; }
+
+VM_C_API cell win_arm_diag_read9(cell a1, cell a2, cell a3, cell a4, cell a5,
+                                 cell a6, cell a7, cell a8, cell p) {
+  (void)a1; (void)a2; (void)a3; (void)a4;
+  (void)a5; (void)a6; (void)a7; (void)a8;
+  return *(cell*)p;
+}
+#endif
+
 }

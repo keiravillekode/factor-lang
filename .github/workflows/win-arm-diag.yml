@@ -6,7 +6,7 @@ name: Windows ARM SEH diagnostics
 
 on:
   push:
-    branches: [ win-arm-seh-diagnostics ]
+    branches: [ win-arm-seh-diagnostics, win-arm-seh-option1-unwind-annotations, win-arm-seh-option2-code-heap-trampolines ]
   workflow_dispatch:
 
 permissions:

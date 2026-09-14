@@ -18,3 +18,20 @@ by the PRs it appears on.
   choose between.
 
 **[Read the write-up](windows-arm64-seh.md)**
+
+## Zig VM: differential GC fuzzing
+
+The `zig-vm-fuzzing` branch adds a fuzzer for the Zig VM that runs random
+GC-heavy Factor programs on it and on the C++ VM, and compares the output.
+It also adds GC stress flags to the Zig VM (`-gc-zeal`, `-gc-zeal-code`,
+`-nursery-budget`, `-verify-heap`).
+
+- **Found:** the three Zig VM fixes in
+  [#3211](https://github.com/factor/factor/pull/3211),
+  [#3212](https://github.com/factor/factor/pull/3212) and
+  [#3213](https://github.com/factor/factor/pull/3213). With each fix
+  reverted, the fuzzer detects the bug again.
+- **Contents:** setup, running and reading a campaign, which flags catch
+  which bug, and pitfalls. It is not `zig build --fuzz`.
+
+**[Read the guide](fuzz-testing.md)**

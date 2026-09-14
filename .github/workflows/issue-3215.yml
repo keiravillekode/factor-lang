@@ -1,0 +1,48 @@
+name: Issue 3215 format-float
+
+# Reproduces https://github.com/factor/factor/issues/3215 on both VMs.
+# Expected while the bug is present: cpp-vm passes, zig-vm fails.
+# Runs on every push to this branch (no PR needed) and on manual dispatch.
+
+on:
+  push:
+    branches: [ issue-3215-format-float ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 3.14159 "%.2f" sprintf must give "3.14"; exit 1 otherwise.
+  REPRO: 'USING: formatting kernel prettyprint system ; 3.14159 "%.2f" sprintf dup . "3.14" = 0 1 ? exit'
+
+jobs:
+  cpp-vm:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: bootstrap (C++ VM)
+      run: ./build.sh net-bootstrap
+    - name: format-float repro
+      run: ./factor -e="$REPRO"
+    - name: formatting tests
+      run: ./factor -run=tools.test formatting
+
+  zig-vm:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: install zig 0.16.0
+      run: |
+        curl -sSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+    - name: build (Zig VM)
+      run: zig version && zig build
+    - name: boot image
+      run: ./build.sh update-boot-image
+    - name: bootstrap (Zig VM)
+      run: ./factor -i=boot.unix-x86.64.image
+    - name: format-float repro
+      run: ./factor -e="$REPRO"
+    - name: formatting tests
+      run: ./factor -run=tools.test formatting

@@ -276,6 +276,43 @@ CONSTANT: compile-nintegrate-steps 1000
 : jacobian ( exprs vars -- matrix )
     '[ _ gradient ] map ;
 
+ERROR: no-antiderivative expr var ;
+
+<PRIVATE
+
+! u*v and v*u' for integration by parts, where v is an antiderivative of dv
+:: parts ( u dv x -- uv rest )
+    dv x antiderivative [ dv x no-antiderivative ] unless* :> v
+    u v s*
+    v u x differentiate s* ;
+
+: at-bound ( expr x bound -- expr' ) 2array 1array subs ;
+
+PRIVATE>
+
+! Integration by parts: integral(u*dv) = u*v - integral(v*u'), with the
+! remaining integral left unevaluated (doit evaluates it).
+:: by-parts ( x u dv -- expr' )
+    u dv x parts :> ( uv rest )
+    rest 0 number= [ uv ] [ uv rest x <integral> s- ] if ;
+
+:: by-parts-u ( expr x u -- expr' )
+    x u expr u s/ by-parts ;
+
+:: by-parts-dv ( expr x dv -- expr' )
+    x expr dv s/ dv by-parts ;
+
+:: definite-by-parts ( x from to u dv -- expr' )
+    u dv x parts :> ( uv rest )
+    uv x to at-bound uv x from at-bound s-
+    rest 0 number= [ rest x from to <definite-integral> s- ] unless ;
+
+:: definite-by-parts-u ( expr x from to u -- expr' )
+    x from to u expr u s/ definite-by-parts ;
+
+:: definite-by-parts-dv ( expr x from to dv -- expr' )
+    x from to expr dv s/ dv definite-by-parts ;
+
 GENERIC: doit ( expr -- expr' )
 
 M: object doit ;

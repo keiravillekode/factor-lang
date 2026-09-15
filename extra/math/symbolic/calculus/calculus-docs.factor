@@ -1,6 +1,6 @@
 ! Copyright (C) 2026 Eric Willigers.
 ! See https://factorcode.org/license.txt for BSD license.
-USING: help.markup help.syntax math math.numerical-integration
+USING: help.markup help.syntax kernel math math.numerical-integration
 math.symbolic math.symbolic.compile sequences ;
 IN: math.symbolic.calculus
 
@@ -32,6 +32,41 @@ HELP: jacobian
 { $values { "exprs" { $sequence "expressions" } } { "vars" { $sequence sym } } { "matrix" "a sequence of sequences" } }
 { $description "The Jacobian matrix: one row, the " { $link gradient } ", for each expression." } ;
 
+HELP: by-parts
+{ $values { "x" sym } { "u" "an expression" } { "dv" "an expression" } { "expr'" "an expression" } }
+{ $description "Integrates " { $snippet "u*dv" } " by parts: " { $snippet "u*v - integrate(v*u', x)" } ", where " { $snippet "v" } " is an antiderivative of " { $snippet "dv" } ". The remaining integral is left unevaluated; " { $link doit } " evaluates it. It is omitted when " { $snippet "u" } " is constant." }
+{ $errors "Throws " { $link no-antiderivative } " when no antiderivative of " { $snippet "dv" } " is found." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x ] symbolic[ x ] symbolic[ x cos ] by-parts expr." "x*sin(x) - integrate(sin(x), x)" } } ;
+
+HELP: by-parts-u
+{ $values { "expr" "an expression" } { "x" sym } { "u" "an expression" } { "expr'" "an expression" } }
+{ $description "Integrates " { $snippet "expr" } " by parts with the given " { $snippet "u" } ", taking " { $snippet "dv" } " as " { $snippet "expr/u" } ". See " { $link by-parts } "." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x x exp * ] symbolic[ x ] symbolic[ x ] by-parts-u expr." "x*exp(x) - integrate(exp(x), x)" } } ;
+
+HELP: by-parts-dv
+{ $values { "expr" "an expression" } { "x" sym } { "dv" "an expression" } { "expr'" "an expression" } }
+{ $description "Integrates " { $snippet "expr" } " by parts with the given " { $snippet "dv" } ", taking " { $snippet "u" } " as " { $snippet "expr/dv" } ". " { $snippet "dv" } " may be 1, as for logarithms. See " { $link by-parts } "." }
+{ $examples
+    { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x log ] symbolic[ x ] 1 by-parts-dv expr." "x*log(x) - integrate(1, x)" }
+    { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x log ] symbolic[ x ] 1 by-parts-dv doit expr." "-x + x*log(x)" }
+} ;
+
+HELP: definite-by-parts
+{ $values { "x" sym } { "from" "an expression" } { "to" "an expression" } { "u" "an expression" } { "dv" "an expression" } { "expr'" "an expression" } }
+{ $description "Integrates " { $snippet "u*dv" } " from " { $snippet "from" } " to " { $snippet "to" } " by parts: " { $snippet "u*v" } " at " { $snippet "to" } " minus at " { $snippet "from" } ", minus the unevaluated definite integral of " { $snippet "v*u'" } ". See " { $link by-parts } "." } ;
+
+HELP: definite-by-parts-u
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "u" "an expression" } { "expr'" "an expression" } }
+{ $description "Like " { $link by-parts-u } " for a definite integral. See " { $link definite-by-parts } "." } ;
+
+HELP: definite-by-parts-dv
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "dv" "an expression" } { "expr'" "an expression" } }
+{ $description "Like " { $link by-parts-dv } " for a definite integral. See " { $link definite-by-parts } "." }
+{ $examples { $example "USING: kernel math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x log ] symbolic[ x ] 1 symbolic[ e ] 1 definite-by-parts-dv\n[ expr. ] [ doit . ] bi" "e - integrate(1, x, 1, e)\n1" } } ;
+
+HELP: no-antiderivative
+{ $error-description "Thrown by the integration by parts words when no antiderivative of " { $snippet "dv" } " is found." } ;
+
 HELP: doit
 { $values { "expr" "an expression" } { "expr'" "an expression" } }
 { $description "Evaluates the unevaluated derivatives and integrals in an expression." }
@@ -39,6 +74,8 @@ HELP: doit
 
 ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 "The " { $vocab-link "math.symbolic.calculus" } " vocabulary differentiates and integrates " { $vocab-link "math.symbolic" } " expressions."
-{ $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit } ;
+{ $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit }
+"Integration by parts, one step at a time:"
+{ $subsections by-parts by-parts-u by-parts-dv definite-by-parts definite-by-parts-u definite-by-parts-dv no-antiderivative } ;
 
 ABOUT: "math.symbolic.calculus"

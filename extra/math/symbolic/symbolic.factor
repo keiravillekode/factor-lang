@@ -151,7 +151,7 @@ PRIVATE>
 M: add unparse-expr
     terms>> unclip expr>string swap [
         dup negative-term?
-        [ negate-term expr>string " - " prepend ]
+        [ negate-term 2 unparse-at-least " - " prepend ]
         [ expr>string " + " prepend ] if
     ] map concat append 1 ;
 
@@ -238,9 +238,14 @@ DEFER: s+
         dup [ { [ number? ] [ mul? ] } 1|| ] any? [
             c prefix >mul
         ] [
-            [ factor-key ] sort-by
-            c 1 number= [ c prefix ] unless
-            dup length { { 0 [ drop 1 ] } { 1 [ first ] } [ drop mul boa ] } case
+            ! A number times a single sum is distributed: 2*(x + 1) = 2*x + 2
+            dup { [ length 1 = ] [ first add? ] } 1&& c 1 number= not and [
+                first terms>> [ c s* ] map >add
+            ] [
+                [ factor-key ] sort-by
+                c 1 number= [ c prefix ] unless
+                dup length { { 0 [ drop 1 ] } { 1 [ first ] } [ drop mul boa ] } case
+            ] if
         ] if
     ] if ;
 

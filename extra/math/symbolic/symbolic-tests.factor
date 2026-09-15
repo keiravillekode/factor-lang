@@ -61,3 +61,14 @@ IN: math.symbolic.tests
 { "sin(?x)^2" } [ symbolic[ ?x sin 2 ^ ] expr>string ] unit-test
 { "symbolic[ ?x sin ]" } [ symbolic[ ?x sin ] unparse ] unit-test
 { { 2 T{ sym f "x" } T{ pvar f "y" } } } [ { "2" "x" "?y" } parse-symbolic-tokens ] unit-test
+
+! A number times a sum is distributed
+{ "2*x + 2" } [ symbolic[ 2 x 1 + * ] expr>string ] unit-test
+{ "-x + 1" } [ symbolic[ x 1 - neg ] expr>string ] unit-test
+{ 1 } [ symbolic[ e e 1 - - ] ] unit-test
+{ "x*(x + 1)" } [ symbolic[ x x 1 + * ] expr>string ] unit-test
+{ "-x*(x + 1) + y" } [ symbolic[ y x x 1 + * - ] expr>string ] unit-test
+! A subtracted sum is parenthesized, for expressions built from tuples
+{ "y - (x + 1)" } [
+    T{ add f { T{ sym f "y" } T{ mul f { -1 T{ add f { T{ sym f "x" } 1 } } } } } } expr>string
+] unit-test

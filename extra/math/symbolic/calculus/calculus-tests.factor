@@ -80,3 +80,42 @@ PRIVATE>
     symbolic[ x y * ] symbolic[ x y + sin ] 2array
     { T{ sym f "x" } T{ sym f "y" } } jacobian [ [ expr>string ] map ] map
 ] unit-test
+
+! Integration by parts
+{ "x*log(x) - integrate(1, x)" } [
+    symbolic[ x log ] x-sym 1 by-parts-dv expr>string
+] unit-test
+{ "-x + x*log(x)" } [ symbolic[ x log ] x-sym 1 by-parts-dv doit expr>string ] unit-test
+{ "x*exp(x) - integrate(exp(x), x)" } [
+    symbolic[ x x exp * ] x-sym x-sym by-parts-u expr>string
+] unit-test
+{ "x*exp(x) - exp(x)" } [ symbolic[ x x exp * ] x-sym x-sym by-parts-u doit expr>string ] unit-test
+{ "x^2*log(x)/2 - integrate(x/2, x)" } [
+    symbolic[ x x log * ] x-sym symbolic[ x log ] by-parts-u expr>string
+] unit-test
+{ "x*sin(x) - integrate(sin(x), x)" } [
+    x-sym x-sym symbolic[ x cos ] by-parts expr>string
+] unit-test
+{ "3*sin(x)" } [ x-sym 3 symbolic[ x cos ] by-parts expr>string ] unit-test
+{ t } [
+    symbolic[ x 2 ^ x exp * ] x-sym symbolic[ x 2 ^ ] by-parts-u doit
+    x-sym differentiate
+    { { T{ sym f "x" } 0.7 } } subs evalf
+    symbolic[ 0.7 2 ^ 0.7 exp * ] evalf - abs 1e-9 <
+] unit-test
+[ symbolic[ x 2 ^ neg exp x * ] x-sym symbolic[ x ] by-parts-u ]
+[ no-antiderivative? ] must-fail-with
+
+! Definite integration by parts
+{ "e - integrate(1, x, 1, e)" } [
+    symbolic[ x log ] x-sym 1 symbolic[ e ] 1 definite-by-parts-dv expr>string
+] unit-test
+{ 1 } [ symbolic[ x log ] x-sym 1 symbolic[ e ] 1 definite-by-parts-dv doit ] unit-test
+{ "e - integrate(exp(x), x, 0, 1)" } [
+    symbolic[ x x exp * ] x-sym 0 1 x-sym definite-by-parts-u expr>string
+] unit-test
+{ 1 } [ symbolic[ x x exp * ] x-sym 0 1 x-sym definite-by-parts-u doit ] unit-test
+{ t } [
+    x-sym 0 symbolic[ pi ] x-sym symbolic[ x sin ] definite-by-parts doit
+    symbolic[ pi ] =
+] unit-test

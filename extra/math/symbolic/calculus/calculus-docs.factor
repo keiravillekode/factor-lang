@@ -11,7 +11,7 @@ HELP: differentiate
 
 HELP: integrate
 { $values { "expr" "an expression" } { "x" sym } { "expr'" "an expression" } }
-{ $description "An antiderivative of " { $snippet "expr" } " with respect to " { $snippet "x" } ", without a constant of integration, or an unevaluated " { $link integral } " when none is found. Handles powers and " { $snippet "sin cos tan exp log" } " of linear arguments, sums, constant factors, " { $snippet "sin^2" } " and " { $snippet "cos^2" } ", polynomials times " { $snippet "exp sin cos log" } " (by parts), exponentials times sines and cosines, and substitution when the rest of a product is a constant times the derivative of an inner expression. " { $snippet "1/x" } " integrates to " { $snippet "log(x)" } ", assuming " { $snippet "x > 0" } "." }
+{ $description "An antiderivative of " { $snippet "expr" } " with respect to " { $snippet "x" } ", without a constant of integration, or an unevaluated " { $link integral } " when none is found. Handles powers, and " { $snippet "sin cos tan exp log" } ", the inverse trigonometric functions, and the hyperbolic and inverse hyperbolic functions, of linear arguments, sums, constant factors, " { $snippet "sin^2" } " and " { $snippet "cos^2" } ", polynomials times " { $snippet "exp sin cos log" } " (by parts), exponentials times sines and cosines, and substitution when the rest of a product is a constant times the derivative of an inner expression. " { $snippet "1/x" } " integrates to " { $snippet "log(x)" } ", assuming " { $snippet "x > 0" } "." }
 { $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x x exp * ] symbolic[ x ] integrate expr." "x*exp(x) - exp(x)" } } ;
 
 HELP: definite-integrate

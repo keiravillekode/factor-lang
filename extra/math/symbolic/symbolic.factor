@@ -84,9 +84,11 @@ M: integral unparse-expr
     [ expr>string ] map ", " join "integrate(" ")" surround 4 ;
 
 : power-string ( base exponent -- string )
-    dup 1 number= [ drop 4 unparse-at-least ] [
-        [ 4 unparse-at-least ] [ 4 unparse-at-least ] bi* "^" glue
-    ] if ;
+    {
+        { [ dup 1 number= ] [ drop 4 unparse-at-least ] }
+        { [ dup 1/2 = ] [ drop expr>string "sqrt(" ")" surround ] }
+        [ [ 4 unparse-at-least ] [ 4 unparse-at-least ] bi* "^" glue ]
+    } cond ;
 
 : negative-exponent? ( expr -- ? )
     { [ pow? ] [ exponent>> number? ] [ exponent>> 0 < ] } 1&& ;
@@ -308,6 +310,7 @@ PRIVATE>
         { [ k integer? ] [ 0 ] }
         { [ k half-odd? ] [ k numerator 4 rem 1 = 1 -1 ? ] }
         { [ u negative-term? ] [ u negate-term ssin sneg ] }
+        { [ u { [ fn? ] [ name>> "asin" = ] } 1&& ] [ u arg>> ] }
         [ "sin" u fn boa ]
     } cond ;
 
@@ -319,6 +322,7 @@ PRIVATE>
         { [ k integer? ] [ k even? 1 -1 ? ] }
         { [ k half-odd? ] [ 0 ] }
         { [ u negative-term? ] [ u negate-term scos ] }
+        { [ u { [ fn? ] [ name>> "acos" = ] } 1&& ] [ u arg>> ] }
         [ "cos" u fn boa ]
     } cond ;
 
@@ -328,6 +332,7 @@ PRIVATE>
         { [ u 0 number= ] [ 0 ] }
         { [ u pi-multiple integer? ] [ 0 ] }
         { [ u negative-term? ] [ u negate-term stan sneg ] }
+        { [ u { [ fn? ] [ name>> "atan" = ] } 1&& ] [ u arg>> ] }
         [ "tan" u fn boa ]
     } cond ;
 
@@ -349,6 +354,89 @@ PRIVATE>
         [ "log" u fn boa ]
     } cond ;
 
+:: sasin ( u -- asin[u] )
+    {
+        { [ u float? ] [ u asin ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u 1 number= ] [ pi-expr 2 s/ ] }
+        { [ u -1 number= ] [ pi-expr -2 s/ ] }
+        { [ u { [ fn? ] [ name>> "sin" = ] } 1&& ] [ "asin" u fn boa ] }
+        { [ u negative-term? ] [ u negate-term sasin sneg ] }
+        [ "asin" u fn boa ]
+    } cond ;
+
+:: sacos ( u -- acos[u] )
+    {
+        { [ u float? ] [ u acos ] }
+        { [ u 0 number= ] [ pi-expr 2 s/ ] }
+        { [ u 1 number= ] [ 0 ] }
+        { [ u -1 number= ] [ pi-expr ] }
+        { [ u negative-term? ] [ pi-expr u negate-term sacos s- ] }
+        [ "acos" u fn boa ]
+    } cond ;
+
+:: satan ( u -- atan[u] )
+    {
+        { [ u float? ] [ u atan ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u 1 number= ] [ pi-expr 4 s/ ] }
+        { [ u -1 number= ] [ pi-expr -4 s/ ] }
+        { [ u negative-term? ] [ u negate-term satan sneg ] }
+        [ "atan" u fn boa ]
+    } cond ;
+
+:: ssinh ( u -- sinh[u] )
+    {
+        { [ u float? ] [ u sinh ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u { [ fn? ] [ name>> "asinh" = ] } 1&& ] [ u arg>> ] }
+        { [ u negative-term? ] [ u negate-term ssinh sneg ] }
+        [ "sinh" u fn boa ]
+    } cond ;
+
+:: scosh ( u -- cosh[u] )
+    {
+        { [ u float? ] [ u cosh ] }
+        { [ u 0 number= ] [ 1 ] }
+        { [ u { [ fn? ] [ name>> "acosh" = ] } 1&& ] [ u arg>> ] }
+        { [ u negative-term? ] [ u negate-term scosh ] }
+        [ "cosh" u fn boa ]
+    } cond ;
+
+:: stanh ( u -- tanh[u] )
+    {
+        { [ u float? ] [ u tanh ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u { [ fn? ] [ name>> "atanh" = ] } 1&& ] [ u arg>> ] }
+        { [ u negative-term? ] [ u negate-term stanh sneg ] }
+        [ "tanh" u fn boa ]
+    } cond ;
+
+:: sasinh ( u -- asinh[u] )
+    {
+        { [ u float? ] [ u asinh ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u { [ fn? ] [ name>> "sinh" = ] } 1&& ] [ u arg>> ] }
+        { [ u negative-term? ] [ u negate-term sasinh sneg ] }
+        [ "asinh" u fn boa ]
+    } cond ;
+
+:: sacosh ( u -- acosh[u] )
+    {
+        { [ u float? ] [ u acosh ] }
+        { [ u 1 number= ] [ 0 ] }
+        [ "acosh" u fn boa ]
+    } cond ;
+
+:: satanh ( u -- atanh[u] )
+    {
+        { [ u float? ] [ u atanh ] }
+        { [ u 0 number= ] [ 0 ] }
+        { [ u { [ fn? ] [ name>> "tanh" = ] } 1&& ] [ u arg>> ] }
+        { [ u negative-term? ] [ u negate-term satanh sneg ] }
+        [ "atanh" u fn boa ]
+    } cond ;
+
 ERROR: unknown-function name ;
 
 : apply-fn ( arg name -- expr )
@@ -358,6 +446,15 @@ ERROR: unknown-function name ;
         { "tan" [ stan ] }
         { "exp" [ sexp ] }
         { "log" [ slog ] }
+        { "asin" [ sasin ] }
+        { "acos" [ sacos ] }
+        { "atan" [ satan ] }
+        { "sinh" [ ssinh ] }
+        { "cosh" [ scosh ] }
+        { "tanh" [ stanh ] }
+        { "asinh" [ sasinh ] }
+        { "acosh" [ sacosh ] }
+        { "atanh" [ satanh ] }
         [ unknown-function ]
     } case ;
 
@@ -480,6 +577,15 @@ CONSTANT: symbolic-words H{
     { "tan" { 1 [ first stan ] } }
     { "exp" { 1 [ first sexp ] } }
     { "log" { 1 [ first slog ] } }
+    { "asin" { 1 [ first sasin ] } }
+    { "acos" { 1 [ first sacos ] } }
+    { "atan" { 1 [ first satan ] } }
+    { "sinh" { 1 [ first ssinh ] } }
+    { "cosh" { 1 [ first scosh ] } }
+    { "tanh" { 1 [ first stanh ] } }
+    { "asinh" { 1 [ first sasinh ] } }
+    { "acosh" { 1 [ first sacosh ] } }
+    { "atanh" { 1 [ first satanh ] } }
     { "pi" { 0 [ drop pi-expr ] } }
     { "e" { 0 [ drop e-expr ] } }
     { "D" { 2 [ first2 <derivative> ] } }

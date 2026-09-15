@@ -41,6 +41,15 @@ M:: fn (compile) ( expr vars -- )
         { "tan" [ \ tan ] }
         { "exp" [ \ e^ ] }
         { "log" [ \ log ] }
+        { "asin" [ \ asin ] }
+        { "acos" [ \ acos ] }
+        { "atan" [ \ atan ] }
+        { "sinh" [ \ sinh ] }
+        { "cosh" [ \ cosh ] }
+        { "tanh" [ \ tanh ] }
+        { "asinh" [ \ asinh ] }
+        { "acosh" [ \ acosh ] }
+        { "atanh" [ \ atanh ] }
     } case , ;
 
 PRIVATE>

@@ -10,14 +10,20 @@ IN: math.symbolic.calculus.tests
 
 ! integrate finds an antiderivative whose derivative equals the
 ! integrand at several points.
-:: antiderivative-checks? ( integrand -- ? )
+:: antiderivative-checks-at? ( integrand points -- ? )
     integrand x-sym integrate :> F
     F x-sym differentiate :> dF
     F integral? not
-    { 0.3 0.7 1.9 } [| v |
+    points [| v |
         x-sym v 2array 1array :> at-v
         integrand at-v subs evalf dF at-v subs evalf - abs 1e-9 <
     ] all? and ;
+
+! Inside the domain of the inverse functions
+CONSTANT: unit-points { 0.2 0.5 0.9 }
+
+: antiderivative-checks? ( integrand -- ? )
+    { 0.3 0.7 1.9 } antiderivative-checks-at? ;
 
 PRIVATE>
 
@@ -119,3 +125,30 @@ PRIVATE>
     x-sym 0 symbolic[ pi ] x-sym symbolic[ x sin ] definite-by-parts doit
     symbolic[ pi ] =
 ] unit-test
+
+! Inverse trigonometric and hyperbolic derivatives
+{ "1/sqrt(-x^2 + 1)" } [ symbolic[ x asin ] x-sym differentiate expr>string ] unit-test
+{ "-1/sqrt(-x^2 + 1)" } [ symbolic[ x acos ] x-sym differentiate expr>string ] unit-test
+{ "1/(x^2 + 1)" } [ symbolic[ x atan ] x-sym differentiate expr>string ] unit-test
+{ "cosh(x)" } [ symbolic[ x sinh ] x-sym differentiate expr>string ] unit-test
+{ "sinh(x)" } [ symbolic[ x cosh ] x-sym differentiate expr>string ] unit-test
+{ "1/cosh(x)^2" } [ symbolic[ x tanh ] x-sym differentiate expr>string ] unit-test
+{ "1/sqrt(x^2 + 1)" } [ symbolic[ x asinh ] x-sym differentiate expr>string ] unit-test
+{ "1/sqrt(x^2 - 1)" } [ symbolic[ x acosh ] x-sym differentiate expr>string ] unit-test
+{ "1/(-x^2 + 1)" } [ symbolic[ x atanh ] x-sym differentiate expr>string ] unit-test
+
+! Inverse trigonometric and hyperbolic antiderivatives
+{ "cosh(x)" } [ symbolic[ x sinh ] x-sym integrate expr>string ] unit-test
+{ "cosh(2*x)/2" } [ symbolic[ 2 x * sinh ] x-sym integrate expr>string ] unit-test
+{ "log(cosh(x))" } [ symbolic[ x tanh ] x-sym integrate expr>string ] unit-test
+{ t } [ symbolic[ x asin ] unit-points antiderivative-checks-at? ] unit-test
+{ t } [ symbolic[ x acos ] unit-points antiderivative-checks-at? ] unit-test
+{ t } [ symbolic[ x atan ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x sinh ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x cosh ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x tanh ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x asinh ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x atanh ] unit-points antiderivative-checks-at? ] unit-test
+{ t } [ symbolic[ 2 x * 1 + atan ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x x sinh * ] antiderivative-checks? ] unit-test
+{ t } [ symbolic[ x asin x 2 ^ neg 1 + sqrt / ] unit-points antiderivative-checks-at? ] unit-test

@@ -119,6 +119,42 @@ HELP: slog
 { $values { "u" "an expression" } { "log[u]" "an expression" } }
 { $description "The natural logarithm." } ;
 
+HELP: sasin
+{ $values { "u" "an expression" } { "asin[u]" "an expression" } }
+{ $description "The arc sine, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: sacos
+{ $values { "u" "an expression" } { "acos[u]" "an expression" } }
+{ $description "The arc cosine, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: satan
+{ $values { "u" "an expression" } { "atan[u]" "an expression" } }
+{ $description "The arc tangent, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: ssinh
+{ $values { "u" "an expression" } { "sinh[u]" "an expression" } }
+{ $description "The hyperbolic sine, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: scosh
+{ $values { "u" "an expression" } { "cosh[u]" "an expression" } }
+{ $description "The hyperbolic cosine, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: stanh
+{ $values { "u" "an expression" } { "tanh[u]" "an expression" } }
+{ $description "The hyperbolic tangent, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: sasinh
+{ $values { "u" "an expression" } { "asinh[u]" "an expression" } }
+{ $description "The inverse hyperbolic sine, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: sacosh
+{ $values { "u" "an expression" } { "acosh[u]" "an expression" } }
+{ $description "The inverse hyperbolic cosine, simplified at 1. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: satanh
+{ $values { "u" "an expression" } { "atanh[u]" "an expression" } }
+{ $description "The inverse hyperbolic tangent, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
 HELP: apply-fn
 { $values { "arg" "an expression" } { "name" string } { "expr" "an expression" } }
 { $description "Applies the function named " { $snippet "name" } " with simplification." } ;
@@ -187,12 +223,14 @@ HELP: expr>postfix
 { $description "The tokens of a " { $link POSTPONE: symbolic[ } " literal for an expression." } ;
 
 ARTICLE: "math.symbolic" "Symbolic algebra"
-"The " { $vocab-link "math.symbolic" } " vocabulary represents polynomials, " { $snippet "sin" } ", " { $snippet "cos" } ", " { $snippet "tan" } ", exponentials, logarithms, their products, and unevaluated derivatives and integrals. Expressions are kept simplified: like terms and powers are combined, numbers are folded exactly, and sums and products are in a canonical order. Calculus is in " { $vocab-link "math.symbolic.calculus" } "."
+"The " { $vocab-link "math.symbolic" } " vocabulary represents polynomials, trigonometric, inverse trigonometric, hyperbolic and inverse hyperbolic functions, exponentials, logarithms, their products, and unevaluated derivatives and integrals. Expressions are kept simplified: like terms and powers are combined, numbers are folded exactly, and sums and products are in a canonical order. Calculus is in " { $vocab-link "math.symbolic.calculus" } "."
 $nl
 "Literals:"
 { $subsections POSTPONE: symbolic[ <sym> <pvar> pi-expr e-expr parse-symbolic-tokens }
 "Arithmetic and functions:"
-{ $subsections s+ s- s* s/ s^ sneg ssqrt ssin scos stan sexp slog apply-fn >add >mul }
+{ $subsections s+ s- s* s/ s^ sneg ssqrt >add >mul }
+"Functions:"
+{ $subsections ssin scos stan sexp slog sasin sacos satan ssinh scosh stanh sasinh sacosh satanh apply-fn }
 "Calculus expressions:"
 { $subsections <derivative> <integral> <definite-integral> }
 "Manipulation and evaluation:"

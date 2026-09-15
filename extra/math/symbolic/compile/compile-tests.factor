@@ -32,3 +32,17 @@ IN: math.symbolic.compile.tests
 [ symbolic[ x z + ] { T{ sym f "x" } } expr>quot ] [ unbound-symbol? ] must-fail-with
 
 [ symbolic[ x x D ] { T{ sym f "x" } } expr>quot ] [ not-compilable? ] must-fail-with
+
+! Inverse trigonometric and hyperbolic functions
+{ t } [
+    0.4 symbolic[ x asin x acos + x atan + ] { T{ sym f "x" } } expr>word execute( x -- r )
+    symbolic[ 0.4 asin 0.4 acos + 0.4 atan + ] evalf 1e-12 ~
+] unit-test
+{ t } [
+    0.4 symbolic[ x sinh x cosh + x tanh + ] { T{ sym f "x" } } expr>word execute( x -- r )
+    symbolic[ 0.4 sinh 0.4 cosh + 0.4 tanh + ] evalf 1e-12 ~
+] unit-test
+{ t } [
+    1.4 symbolic[ x asinh x acosh + 1 x / atanh + ] { T{ sym f "x" } } expr>word execute( x -- r )
+    symbolic[ 1.4 asinh 1.4 acosh + 1 1.4 / atanh + ] evalf 1e-12 ~
+] unit-test

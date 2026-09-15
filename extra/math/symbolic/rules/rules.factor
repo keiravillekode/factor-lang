@@ -171,6 +171,16 @@ PRIVATE>
         [ symbolic[ 2 ?x sin * ?x cos * ] symbolic[ 2 ?x * sin ] <rule> ]
     } [ call( -- rule ) ] map append ;
 
+: hyperbolic-rules ( -- rules )
+    {
+        [ symbolic[ ?x cosh 2 ^ ?x sinh 2 ^ - ] 1 <rule> ]
+        [
+            symbolic[ ?a ?x cosh 2 ^ * ?b ?x sinh 2 ^ * + ] symbolic[ ?a ]
+            [ [ "a" binding ] [ "b" binding ] bi s+ 0 number= ] <conditional-rule>
+        ]
+        [ symbolic[ ?x tanh ] symbolic[ ?x sinh ?x cosh / ] <rule> ]
+    } [ call( -- rule ) ] map ;
+
 : log-expand-rules ( -- rules )
     {
         [ symbolic[ ?a ?b * log ] symbolic[ ?a log ?b log + ] <rule> ]

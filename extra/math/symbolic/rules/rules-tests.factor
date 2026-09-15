@@ -46,3 +46,8 @@ IN: math.symbolic.rules.tests
 
 [ "USING: math.symbolic.rules ; rule[ x y ]" eval( -- rule ) ] must-fail
 [ "USING: math.symbolic.rules ; rule[ x y => z ]" eval( -- rule ) ] must-fail
+
+! Hyperbolic rules
+{ 1 } [ symbolic[ x cosh 2 ^ x sinh 2 ^ - ] hyperbolic-rules rewrite ] unit-test
+{ 5 } [ symbolic[ 5 x cosh 2 ^ * 5 x sinh 2 ^ * - ] hyperbolic-rules rewrite ] unit-test
+{ "sinh(x)/cosh(x)" } [ symbolic[ x tanh ] hyperbolic-rules rewrite expr>string ] unit-test

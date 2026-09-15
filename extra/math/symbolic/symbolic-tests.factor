@@ -72,3 +72,29 @@ IN: math.symbolic.tests
 { "y - (x + 1)" } [
     T{ add f { T{ sym f "y" } T{ mul f { -1 T{ add f { T{ sym f "x" } 1 } } } } } } expr>string
 ] unit-test
+
+! Inverse trigonometric and hyperbolic functions
+{ 0 } [ symbolic[ 0 asin ] ] unit-test
+{ "pi/2" } [ symbolic[ 1 asin ] expr>string ] unit-test
+{ "-pi/2" } [ symbolic[ -1 asin ] expr>string ] unit-test
+{ "pi/2" } [ symbolic[ 0 acos ] expr>string ] unit-test
+{ 0 } [ symbolic[ 1 acos ] ] unit-test
+{ "pi" } [ symbolic[ -1 acos ] expr>string ] unit-test
+{ "pi/4" } [ symbolic[ 1 atan ] expr>string ] unit-test
+{ 0 } [ symbolic[ 0 sinh ] ] unit-test
+{ 1 } [ symbolic[ 0 cosh ] ] unit-test
+{ 0 } [ symbolic[ 0 tanh ] ] unit-test
+{ 0 } [ symbolic[ 1 acosh ] ] unit-test
+{ "-asin(x)" } [ symbolic[ x neg asin ] expr>string ] unit-test
+{ "-acos(x) + pi" } [ symbolic[ x neg acos ] expr>string ] unit-test
+{ "-sinh(x)" } [ symbolic[ x neg sinh ] expr>string ] unit-test
+{ "cosh(x)" } [ symbolic[ x neg cosh ] expr>string ] unit-test
+{ "-atanh(x)" } [ symbolic[ x neg atanh ] expr>string ] unit-test
+{ "x" } [ symbolic[ x asin sin ] expr>string ] unit-test
+{ "x" } [ symbolic[ x atan tan ] expr>string ] unit-test
+{ "x" } [ symbolic[ x asinh sinh ] expr>string ] unit-test
+{ "x" } [ symbolic[ x sinh asinh ] expr>string ] unit-test
+{ "asin(sin(x))" } [ symbolic[ x sin asin ] expr>string ] unit-test
+{ "tanh(atanh(x) + 1)" } [ symbolic[ x atanh 1 + tanh ] expr>string ] unit-test
+{ t } [ symbolic[ 0.5 asin ] symbolic[ pi 6 / ] evalf 1e-12 ~ ] unit-test
+{ t } [ symbolic[ 1.0 cosh ] 1.5430806348152437 1e-12 ~ ] unit-test

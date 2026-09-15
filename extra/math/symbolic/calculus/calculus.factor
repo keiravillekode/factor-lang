@@ -49,6 +49,15 @@ M:: fn differentiate ( expr var -- expr' )
         { "tan" [ scos -2 s^ ] }
         { "exp" [ sexp ] }
         { "log" [ -1 s^ ] }
+        { "asin" [ 2 s^ 1 swap s- ssqrt -1 s^ ] }
+        { "acos" [ 2 s^ 1 swap s- ssqrt -1 s^ sneg ] }
+        { "atan" [ 2 s^ 1 s+ -1 s^ ] }
+        { "sinh" [ scosh ] }
+        { "cosh" [ ssinh ] }
+        { "tanh" [ scosh -2 s^ ] }
+        { "asinh" [ 2 s^ 1 s+ ssqrt -1 s^ ] }
+        { "acosh" [ 2 s^ 1 s- ssqrt -1 s^ ] }
+        { "atanh" [ 2 s^ 1 swap s- -1 s^ ] }
     } case s* ;
 
 M: derivative differentiate [ doit ] dip differentiate ;
@@ -109,6 +118,15 @@ DEFER: (integrate)
             { "tan" [ scos slog sneg ] }
             { "exp" [ sexp ] }
             { "log" [ dup slog s* u s- ] }
+            { "sinh" [ scosh ] }
+            { "cosh" [ ssinh ] }
+            { "tanh" [ scosh slog ] }
+            { "asin" [ [ dup sasin s* ] [ 2 s^ 1 swap s- ssqrt ] bi s+ ] }
+            { "acos" [ [ dup sacos s* ] [ 2 s^ 1 swap s- ssqrt ] bi s- ] }
+            { "atan" [ [ dup satan s* ] [ 2 s^ 1 s+ slog 2 s/ ] bi s- ] }
+            { "asinh" [ [ dup sasinh s* ] [ 2 s^ 1 s+ ssqrt ] bi s- ] }
+            { "acosh" [ [ dup sacosh s* ] [ 2 s^ 1 s- ssqrt ] bi s- ] }
+            { "atanh" [ [ dup satanh s* ] [ 2 s^ 1 swap s- slog 2 s/ ] bi s+ ] }
         } case a s/
     ] [ f ] if ;
 

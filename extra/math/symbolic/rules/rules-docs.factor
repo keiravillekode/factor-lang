@@ -49,6 +49,10 @@ HELP: trig-rules
 { $values { "rules" { $sequence rule } } }
 { $description "The " { $link pythagorean-rules } ", tan(x) = sin(x)/cos(x) and 2*sin(x)*cos(x) = sin(2*x)." } ;
 
+HELP: hyperbolic-rules
+{ $values { "rules" { $sequence rule } } }
+{ $description "cosh(x)^2 - sinh(x)^2 = 1, also with a common coefficient, and tanh(x) = sinh(x)/cosh(x)." } ;
+
 HELP: log-expand-rules
 { $values { "rules" { $sequence rule } } }
 { $description "log(a*b) = log(a) + log(b) and log(a^n) = n*log(a), for positive a and b." } ;
@@ -63,7 +67,7 @@ ARTICLE: "math.symbolic.rules" "Symbolic rewrite rules"
 "Using rules:"
 { $subsections match apply-rule rewrite }
 "Rule sets:"
-{ $subsections pythagorean-rules trig-rules log-expand-rules exp-rules }
+{ $subsections pythagorean-rules trig-rules hyperbolic-rules log-expand-rules exp-rules }
 { $subsections bad-rule } ;
 
 ABOUT: "math.symbolic.rules"

@@ -1,0 +1,1 @@
+Rewrite rules with pattern variables for symbolic expressions

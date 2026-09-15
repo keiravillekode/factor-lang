@@ -5,7 +5,7 @@ IN: math.symbolic
 
 HELP: symbolic[
 { $syntax "symbolic[ tokens... ]" }
-{ $description "Builds symbolic expressions at parse time from postfix tokens, pushing whatever remains as literals. Numbers are numbers; " { $snippet "+ - * / ^ neg sqrt sin cos tan exp log" } " combine expressions; " { $snippet "pi" } " and " { $snippet "e" } " are constants; " { $snippet "D" } " " { $snippet "( f x -- )" } ", " { $snippet "integral" } " " { $snippet "( f x -- )" } " and " { $snippet "definite-integral" } " " { $snippet "( f x a b -- )" } " build unevaluated calculus expressions; every other token is a variable." }
+{ $description "Builds symbolic expressions at parse time from postfix tokens, pushing whatever remains as literals. Numbers are numbers; " { $snippet "+ - * / ^ neg sqrt sin cos tan exp log" } " combine expressions; " { $snippet "pi" } " and " { $snippet "e" } " are constants; " { $snippet "D" } " " { $snippet "( f x -- )" } ", " { $snippet "integral" } " " { $snippet "( f x -- )" } " and " { $snippet "definite-integral" } " " { $snippet "( f x a b -- )" } " build unevaluated calculus expressions; " { $snippet "?name" } " is a pattern variable, for " { $vocab-link "math.symbolic.rules" } "; every other token is a variable." }
 { $examples
     { $example "USING: math.symbolic ;" "symbolic[ 3 x sin * x + 4 y exp * + ] expr." "x + 3*sin(x) + 4*exp(y)" }
     { $example "USING: kernel math.symbolic ;" "symbolic[ x x + x x * ] [ expr. ] bi@" "2*x\nx^2" }
@@ -17,6 +17,17 @@ HELP: sym
 HELP: <sym>
 { $values { "name" string } { "sym" sym } }
 { $description "Creates a variable." } ;
+
+HELP: pvar
+{ $class-description "A pattern variable, written " { $snippet "?name" } ", which matches any expression in " { $vocab-link "math.symbolic.rules" } "." } ;
+
+HELP: <pvar>
+{ $values { "name" string } { "pvar" pvar } }
+{ $description "Creates a pattern variable." } ;
+
+HELP: parse-symbolic-tokens
+{ $values { "tokens" { $sequence string } } { "exprs" { $sequence "expressions" } } }
+{ $description "Runs tokens as " { $link POSTPONE: symbolic[ } " does, outputting the resulting expressions." } ;
 
 HELP: const
 { $class-description "A named constant: " { $link pi-expr } " or " { $link e-expr } "." } ;
@@ -179,7 +190,7 @@ ARTICLE: "math.symbolic" "Symbolic algebra"
 "The " { $vocab-link "math.symbolic" } " vocabulary represents polynomials, " { $snippet "sin" } ", " { $snippet "cos" } ", " { $snippet "tan" } ", exponentials, logarithms, their products, and unevaluated derivatives and integrals. Expressions are kept simplified: like terms and powers are combined, numbers are folded exactly, and sums and products are in a canonical order. Calculus is in " { $vocab-link "math.symbolic.calculus" } "."
 $nl
 "Literals:"
-{ $subsections POSTPONE: symbolic[ <sym> pi-expr e-expr }
+{ $subsections POSTPONE: symbolic[ <sym> <pvar> pi-expr e-expr parse-symbolic-tokens }
 "Arithmetic and functions:"
 { $subsections s+ s- s* s/ s^ sneg ssqrt ssin scos stan sexp slog apply-fn >add >mul }
 "Calculus expressions:"
@@ -189,7 +200,7 @@ $nl
 "Printing:"
 { $subsections expr>string expr. expr>postfix }
 "Expression classes:"
-{ $subsections symbolic sym const add mul pow fn derivative integral }
+{ $subsections symbolic sym const add mul pow fn derivative integral pvar }
 "Simplification assumes real variables, so for example " { $snippet "log(exp(x))" } " becomes " { $snippet "x" } "." ;
 
 ABOUT: "math.symbolic"

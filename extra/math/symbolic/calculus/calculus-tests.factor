@@ -70,3 +70,13 @@ PRIVATE>
 ! Leibniz rule
 { 1/2 } [ symbolic[ x y * x 0 1 definite-integral ] "y" <sym> differentiate ] unit-test
 { "2*t*sin(t^2)" } [ symbolic[ x sin x 0 t 2 ^ definite-integral ] "t" <sym> differentiate expr>string ] unit-test
+
+! Gradient and Jacobian
+{ "2*x*y" "x^2 + cos(y)" } [
+    symbolic[ x 2 ^ y * y sin + ] { T{ sym f "x" } T{ sym f "y" } } gradient
+    first2 [ expr>string ] bi@
+] unit-test
+{ { { "y" "x" } { "cos(x + y)" "cos(x + y)" } } } [
+    symbolic[ x y * ] symbolic[ x y + sin ] 2array
+    { T{ sym f "x" } T{ sym f "y" } } jacobian [ [ expr>string ] map ] map
+] unit-test

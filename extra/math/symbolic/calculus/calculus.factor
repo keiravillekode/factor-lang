@@ -2,7 +2,7 @@
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors arrays assocs combinators
 combinators.short-circuit kernel math math.numerical-integration
-math.symbolic namespaces sequences ;
+math.symbolic math.symbolic.compile namespaces sequences words ;
 IN: math.symbolic.calculus
 
 DEFER: doit
@@ -258,9 +258,23 @@ PRIVATE>
         F x from 2array 1array subs s-
     ] [ expr x from to <definite-integral> ] if* ;
 
+! Compiling costs a few milliseconds, which pays off only for many
+! evaluation points.
+CONSTANT: compile-nintegrate-steps 1000
+
 :: nintegrate ( expr x from to -- value )
-    from evalf to evalf
-    [ x swap 2array 1array expr swap subs evalf ] integrate-simpson ;
+    num-steps get compile-nintegrate-steps >= [
+        expr x 1array expr>word '[ _ execute( x -- value ) ]
+    ] [
+        [ x swap 2array 1array expr swap subs evalf ]
+    ] if :> f
+    from evalf to evalf [ f call( x -- value ) ] integrate-simpson ;
+
+: gradient ( expr vars -- exprs )
+    [ differentiate ] with map ;
+
+: jacobian ( exprs vars -- matrix )
+    '[ _ gradient ] map ;
 
 GENERIC: doit ( expr -- expr' )
 

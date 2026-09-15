@@ -18,10 +18,13 @@ TUPLE: pow base exponent ;
 TUPLE: fn name arg ;
 TUPLE: derivative expr var ;
 TUPLE: integral expr var from to ;
+TUPLE: pvar name ;
 
-UNION: symbolic sym const add mul pow fn derivative integral ;
+UNION: symbolic sym const add mul pow fn derivative integral pvar ;
 
 : <sym> ( name -- sym ) sym boa ;
+
+: <pvar> ( name -- pvar ) pvar boa ;
 
 CONSTANT: pi-expr T{ const f "pi" }
 
@@ -66,6 +69,8 @@ M: float unparse-expr [ number>string ] [ 0 < 2 4 ? ] bi ;
 M: sym unparse-expr name>> 4 ;
 
 M: const unparse-expr name>> 4 ;
+
+M: pvar unparse-expr name>> "?" prepend 4 ;
 
 M: fn unparse-expr
     [ name>> ] [ arg>> expr>string ] bi "(" ")" surround append 4 ;
@@ -409,6 +414,8 @@ M: number evalf >float ;
 
 M: sym evalf name>> unbound-symbol ;
 
+M: pvar evalf name>> "?" prepend unbound-symbol ;
+
 M: const evalf name>> "pi" = pi e ? ;
 
 M: add evalf terms>> [ evalf ] map-sum ;
@@ -484,10 +491,17 @@ CONSTANT: symbolic-words H{
             stack i tail >array quot call( args -- expr )
             i stack shorten
             stack push
-        ] [ token <sym> stack push ] if*
+        ] [
+            token { [ "?" head? ] [ length 1 > ] } 1&&
+            [ token rest <pvar> ] [ token <sym> ] if
+            stack push
+        ] if*
     ] if* ;
 
 PRIVATE>
+
+: parse-symbolic-tokens ( tokens -- exprs )
+    V{ } clone [ '[ _ swap parse-symbolic-token ] each ] keep >array ;
 
 SYNTAX: symbolic[
     V{ } clone "]" over '[ _ swap parse-symbolic-token ] each-token
@@ -502,6 +516,8 @@ M: number (postfix) number>string , ;
 M: sym (postfix) name>> , ;
 
 M: const (postfix) name>> , ;
+
+M: pvar (postfix) name>> "?" prepend , ;
 
 M: add (postfix) terms>> unclip (postfix) [ (postfix) "+" , ] each ;
 

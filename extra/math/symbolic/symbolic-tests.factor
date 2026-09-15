@@ -56,3 +56,8 @@ IN: math.symbolic.tests
 { "D(x^3, x)" } [ symbolic[ x 3 ^ x D ] expr>string ] unit-test
 { "integrate(sin(x), x, 0, pi)" } [ symbolic[ x sin x 0 pi definite-integral ] expr>string ] unit-test
 [ "USING: math.symbolic ; symbolic[ + ]" eval( -- expr ) ] must-fail
+
+! Pattern variables
+{ "sin(?x)^2" } [ symbolic[ ?x sin 2 ^ ] expr>string ] unit-test
+{ "symbolic[ ?x sin ]" } [ symbolic[ ?x sin ] unparse ] unit-test
+{ { 2 T{ sym f "x" } T{ pvar f "y" } } } [ { "2" "x" "?y" } parse-symbolic-tokens ] unit-test

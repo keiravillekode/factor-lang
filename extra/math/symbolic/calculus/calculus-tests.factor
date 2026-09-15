@@ -152,3 +152,39 @@ PRIVATE>
 { t } [ symbolic[ 2 x * 1 + atan ] antiderivative-checks? ] unit-test
 { t } [ symbolic[ x x sinh * ] antiderivative-checks? ] unit-test
 { t } [ symbolic[ x asin x 2 ^ neg 1 + sqrt / ] unit-points antiderivative-checks-at? ] unit-test
+
+! Definite integrals by symmetry
+{ 0 } [ symbolic[ x 3 ^ ] x-sym -1 1 definite-by-symmetry ] unit-test
+{ t } [
+    symbolic[ 1 x tan + log ] x-sym 0 symbolic[ pi 4 / ] definite-by-symmetry
+    symbolic[ pi 2 log * 8 / ] = 
+] unit-test
+{ t } [
+    symbolic[ 1 x tan + log ] x-sym 0 symbolic[ pi 4 / ] definite-by-symmetry evalf
+    0.2721982612879503 1e-12 ~
+] unit-test
+! definite-integrate uses symmetry only when it is symbolically exact
+{ 0 } [
+    symbolic[ x 2 ^ sin x 1 - neg 2 ^ sin - ] x-sym 0 1 definite-integrate
+] unit-test
+{ "integrate(log(tan(x) + 1), x, 0, pi/4)" } [
+    symbolic[ 1 x tan + log ] x-sym 0 symbolic[ pi 4 / ] definite-integrate expr>string
+] unit-test
+{ "integrate(exp(-x^2), x, 0, 1)" } [
+    symbolic[ x 2 ^ neg exp ] x-sym 0 1 definite-by-symmetry expr>string
+] unit-test
+
+! Differentiation under the integral sign
+{ 1/3 } [
+    symbolic[ t x 2 ^ * x + ] x-sym 0 1 symbolic[ t ] feynman-derivative
+] unit-test
+{ t } [
+    symbolic[ t x 2 ^ * x + ] x-sym 0 1 symbolic[ t ] 0 feynman-solve
+    symbolic[ t x 2 ^ * x + ] x-sym 0 1 definite-integrate =
+] unit-test
+{ "t/3 + 1/2" } [
+    symbolic[ t x 2 ^ * x + ] x-sym 0 1 symbolic[ t ] 0 feynman-solve expr>string
+] unit-test
+{ t } [
+    symbolic[ t x 2 ^ neg exp * ] x-sym 0 1 symbolic[ t ] 1 feynman-solve integral?
+] unit-test

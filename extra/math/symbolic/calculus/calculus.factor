@@ -1,8 +1,9 @@
 ! Copyright (C) 2026 Eric Willigers.
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors arrays assocs combinators
-combinators.short-circuit kernel math math.numerical-integration
-math.symbolic math.symbolic.compile namespaces sequences words ;
+combinators.short-circuit continuations kernel math
+math.numerical-integration math.symbolic math.symbolic.compile
+namespaces sequences words ;
 IN: math.symbolic.calculus
 
 DEFER: doit
@@ -265,6 +266,39 @@ DEFER: (integrate)
 : antiderivative ( expr x -- F/f )
     0 integration-depth [ (integrate) ] with-variable ;
 
+: at-bound ( expr x bound -- expr' ) 2array 1array subs ;
+
+! f(x) + f(a + b - x), which is constant when the graph is symmetric
+! about the midpoint of the interval
+:: symmetry-sum ( expr x from to -- g )
+    expr x from to s+ x s- at-bound expr s+ ;
+
+CONSTANT: symmetry-sample-fractions { 1/8 1/4 3/8 1/2 5/8 3/4 7/8 }
+
+:: constant-between? ( g c x from to -- ? )
+    [
+        c evalf :> cv
+        from evalf :> a
+        to evalf :> b
+        symmetry-sample-fractions [| fraction |
+            g x b a - fraction * a + at-bound evalf cv - abs 1e-9 <
+        ] all?
+    ] [ drop f ] recover ;
+
+:: symmetry-constant-exact ( expr x from to -- c/f )
+    expr x from to symmetry-sum :> g
+    g x free-of? [ g ] [ f ] if ;
+
+! Verified numerically when the sum is not symbolically constant
+:: symmetry-constant ( expr x from to -- c/f )
+    expr x from to symmetry-sum :> g
+    g x free-of? [ g ] [
+        g x from at-bound :> c
+        g c x from to constant-between? [ c ] [ f ] if
+    ] if ;
+
+: symmetry-value ( c from to -- expr ) swap s- swap s* 2 s/ ;
+
 PRIVATE>
 
 : integrate ( expr x -- expr' )
@@ -274,7 +308,19 @@ PRIVATE>
     expr x antiderivative [| F |
         F x to 2array 1array subs
         F x from 2array 1array subs s-
-    ] [ expr x from to <definite-integral> ] if* ;
+    ] [
+        expr x from to symmetry-constant-exact
+        [ from to symmetry-value ]
+        [ expr x from to <definite-integral> ] if*
+    ] if* ;
+
+! The definite integral from the symmetry f(x) + f(a + b - x) = c, which
+! gives (b - a)*c/2. The sum is checked numerically when it is not
+! symbolically constant.
+:: definite-by-symmetry ( expr x from to -- expr' )
+    expr x from to symmetry-constant
+    [ from to symmetry-value ]
+    [ expr x from to <definite-integral> ] if* ;
 
 ! Compiling costs a few milliseconds, which pays off only for many
 ! evaluation points.
@@ -304,7 +350,6 @@ ERROR: no-antiderivative expr var ;
     u v s*
     v u x differentiate s* ;
 
-: at-bound ( expr x bound -- expr' ) 2array 1array subs ;
 
 PRIVATE>
 
@@ -330,6 +375,23 @@ PRIVATE>
 
 :: definite-by-parts-dv ( expr x from to dv -- expr' )
     x from to expr dv s/ dv definite-by-parts ;
+
+! Differentiation under the integral sign: F'(t), where F(t) is the
+! definite integral of expr with respect to x.
+:: feynman-derivative ( expr x from to t -- expr' )
+    expr t differentiate x from to definite-integrate ;
+
+! F(t) recovered from F'(t) and the known value F(t0): the antiderivative
+! G of F'(t), as G(t) - G(t0) + F(t0). Outputs the unevaluated integral
+! when a step has no closed form.
+:: feynman-solve ( expr x from to t t0 -- expr' )
+    expr x from to t feynman-derivative :> Fp
+    Fp integral? [ expr x from to <definite-integral> ] [
+        Fp t antiderivative [| G |
+            G G t t0 at-bound s-
+            expr t t0 at-bound x from to definite-integrate s+
+        ] [ expr x from to <definite-integral> ] if*
+    ] if ;
 
 GENERIC: doit ( expr -- expr' )
 

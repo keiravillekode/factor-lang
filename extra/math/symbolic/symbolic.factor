@@ -300,6 +300,11 @@ DEFER: s+
 
 : half-odd? ( k -- ? ) { [ ratio? ] [ denominator 2 = ] } 1&& ;
 
+: quarter-odd? ( k -- ? ) { [ ratio? ] [ denominator 4 = ] } 1&& ;
+
+! 1/sqrt(2), the magnitude of sin and cos at odd multiples of pi/4
+: half-root-2 ( -- expr ) 2 -1/2 pow boa ;
+
 PRIVATE>
 
 :: ssin ( u -- sin[u] )
@@ -309,6 +314,9 @@ PRIVATE>
         { [ u 0 number= ] [ 0 ] }
         { [ k integer? ] [ 0 ] }
         { [ k half-odd? ] [ k numerator 4 rem 1 = 1 -1 ? ] }
+        { [ k quarter-odd? ] [
+            half-root-2 k numerator 8 rem 4 < [ ] [ sneg ] if
+        ] }
         { [ u negative-term? ] [ u negate-term ssin sneg ] }
         { [ u { [ fn? ] [ name>> "asin" = ] } 1&& ] [ u arg>> ] }
         [ "sin" u fn boa ]
@@ -321,6 +329,9 @@ PRIVATE>
         { [ u 0 number= ] [ 1 ] }
         { [ k integer? ] [ k even? 1 -1 ? ] }
         { [ k half-odd? ] [ 0 ] }
+        { [ k quarter-odd? ] [
+            half-root-2 k numerator 8 rem dup 1 = swap 7 = or [ ] [ sneg ] if
+        ] }
         { [ u negative-term? ] [ u negate-term scos ] }
         { [ u { [ fn? ] [ name>> "acos" = ] } 1&& ] [ u arg>> ] }
         [ "cos" u fn boa ]
@@ -331,6 +342,9 @@ PRIVATE>
         { [ u float? ] [ u tan ] }
         { [ u 0 number= ] [ 0 ] }
         { [ u pi-multiple integer? ] [ 0 ] }
+        { [ u pi-multiple quarter-odd? ] [
+            u pi-multiple numerator 8 rem dup 1 = swap 5 = or 1 -1 ?
+        ] }
         { [ u negative-term? ] [ u negate-term stan sneg ] }
         { [ u { [ fn? ] [ name>> "atan" = ] } 1&& ] [ u arg>> ] }
         [ "tan" u fn boa ]

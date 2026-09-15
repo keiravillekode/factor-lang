@@ -32,6 +32,21 @@ HELP: jacobian
 { $values { "exprs" { $sequence "expressions" } } { "vars" { $sequence sym } } { "matrix" "a sequence of sequences" } }
 { $description "The Jacobian matrix: one row, the " { $link gradient } ", for each expression." } ;
 
+HELP: definite-by-symmetry
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "expr'" "an expression" } }
+{ $description "The definite integral from the symmetry " { $snippet "f(x) + f(a + b - x) = c" } ", which gives " { $snippet "(b - a)*c/2" } ". " { $snippet "c" } " is the sum at " { $snippet "from" } ", that is " { $snippet "f(a) + f(b)" } ". Outputs the unevaluated " { $link integral } " when the sum is not constant." }
+{ $notes "When the sum is not symbolically constant, it is only checked numerically, at seven points of the interval, so the result is not a proof. " { $link definite-integrate } " uses this only in the symbolically exact case." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ 1 x tan + log ] symbolic[ x ] 0 symbolic[ pi 4 / ]\ndefinite-by-symmetry expr." "log(2)*pi/8" } } ;
+
+HELP: feynman-derivative
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "t" sym } { "expr'" "an expression" } }
+{ $description "Differentiation under the integral sign: the derivative with respect to the parameter " { $snippet "t" } " of the definite integral of " { $snippet "expr" } " over " { $snippet "x" } ", that is the definite integral of " { $snippet "d expr / dt" } "." } ;
+
+HELP: feynman-solve
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "t" sym } { "t0" "an expression" } { "expr'" "an expression" } }
+{ $description "Feynman's trick: recovers " { $snippet "F(t)" } ", the definite integral of " { $snippet "expr" } " over " { $snippet "x" } ", from " { $link feynman-derivative } " and the value at " { $snippet "t0" } ", as " { $snippet "G(t) - G(t0) + F(t0)" } " for an antiderivative " { $snippet "G" } " of " { $snippet "F'" } ". Outputs the unevaluated " { $link integral } " when any step has no closed form." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ t x 2 ^ * x + ] symbolic[ x ] 0 1 symbolic[ t ] 0\nfeynman-solve expr." "t/3 + 1/2" } } ;
+
 HELP: by-parts
 { $values { "x" sym } { "u" "an expression" } { "dv" "an expression" } { "expr'" "an expression" } }
 { $description "Integrates " { $snippet "u*dv" } " by parts: " { $snippet "u*v - integrate(v*u', x)" } ", where " { $snippet "v" } " is an antiderivative of " { $snippet "dv" } ". The remaining integral is left unevaluated; " { $link doit } " evaluates it. It is omitted when " { $snippet "u" } " is constant." }
@@ -75,6 +90,8 @@ HELP: doit
 ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 "The " { $vocab-link "math.symbolic.calculus" } " vocabulary differentiates and integrates " { $vocab-link "math.symbolic" } " expressions."
 { $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit }
+"Definite integrals by symmetry, and Feynman's trick:"
+{ $subsections definite-by-symmetry feynman-derivative feynman-solve }
 "Integration by parts, one step at a time:"
 { $subsections by-parts by-parts-u by-parts-dv definite-by-parts definite-by-parts-u definite-by-parts-dv no-antiderivative } ;
 

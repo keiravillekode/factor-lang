@@ -188,3 +188,26 @@ PRIVATE>
 { t } [
     symbolic[ t x 2 ^ neg exp * ] x-sym 0 1 symbolic[ t ] 1 feynman-solve integral?
 ] unit-test
+
+! Limits
+{ 0 } [ symbolic[ x x log * ] x-sym 0 limit ] unit-test
+{ 1 } [ symbolic[ x sin x / ] x-sym 0 limit ] unit-test
+{ 1/2 } [ symbolic[ 1 x cos - x 2 ^ / ] x-sym 0 limit ] unit-test
+{ 2 } [ symbolic[ 2 x 2 ^ * 3 + x 2 ^ 1 - / ] x-sym symbolic[ inf ] limit ] unit-test
+{ 0 } [ symbolic[ x x exp / ] x-sym symbolic[ inf ] limit ] unit-test
+{ 0 } [ symbolic[ x log x / ] x-sym symbolic[ inf ] limit ] unit-test
+{ "pi/2" } [ symbolic[ x atan ] x-sym symbolic[ inf ] limit expr>string ] unit-test
+{ "inf" } [ symbolic[ x log ] x-sym symbolic[ inf ] limit expr>string ] unit-test
+{ 0 } [ symbolic[ x neg exp ] x-sym symbolic[ inf ] limit ] unit-test
+{ 1 } [ symbolic[ x tanh ] x-sym symbolic[ inf ] limit ] unit-test
+{ 5 } [ symbolic[ 5 ] x-sym 0 limit ] unit-test
+{ "limit(sin(x), x, inf)" } [ symbolic[ x sin ] x-sym symbolic[ inf ] limit expr>string ] unit-test
+{ 0 } [ symbolic[ x x log * x 0 limit ] doit ] unit-test
+
+! Improper integrals
+{ 1 } [ symbolic[ x neg exp ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ 1 } [ symbolic[ x -2 ^ ] x-sym 1 symbolic[ inf ] definite-integrate ] unit-test
+{ 1 } [ symbolic[ x x neg exp * ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ "pi/2" } [ symbolic[ x 2 ^ 1 + -1 ^ ] x-sym 0 symbolic[ inf ] definite-integrate expr>string ] unit-test
+{ "inf" } [ symbolic[ 1 x / ] x-sym 1 symbolic[ inf ] definite-integrate expr>string ] unit-test
+{ -1 } [ symbolic[ x log ] x-sym 0 1 definite-integrate ] unit-test

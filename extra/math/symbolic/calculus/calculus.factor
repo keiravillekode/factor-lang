@@ -79,6 +79,8 @@ M:: integral differentiate ( expr var -- expr' )
         ]
     } cond ;
 
+DEFER: limit
+
 <PRIVATE
 
 SYMBOL: integration-depth
@@ -131,10 +133,32 @@ DEFER: (integrate)
         } case a s/
     ] [ f ] if ;
 
+! 1/(u^2 + c) integrates to atan(u/sqrt(c))/(a*sqrt(c))
+:: integrate-reciprocal-quadratic ( b x -- F/f )
+    b terms>> :> terms
+    terms length 2 = [
+        terms [ x free-of? ] partition :> ( constants squares )
+        constants length 1 = squares length 1 = and [
+            constants first :> c
+            squares first :> square
+            square pow? [ square exponent>> 2 number= ] [ f ] if [
+                square base>> :> u
+                u x linear-coefficients drop :> a
+                a c number? and [ c 0 > ] [ f ] if [
+                    c ssqrt :> root
+                    u root s/ satan root s/ a s/
+                ] [ f ] if
+            ] [ f ] if
+        ] [ f ] if
+    ] [ f ] if ;
+
 :: integrate-pow ( expr x -- F/f )
     expr base>> :> b
     expr exponent>> :> n
+    n -1 number= b add? and
+    [ b x integrate-reciprocal-quadratic ] [ f ] if :> arc-tangent-form
     {
+        { [ arc-tangent-form ] [ arc-tangent-form ] }
         { [ n 2 number= b "sin" fn-named? and ] [
             1 2 b arg>> s* scos s- 2 s/ x (integrate)
         ] }
@@ -299,6 +323,14 @@ CONSTANT: symmetry-sample-fractions { 1/8 1/4 3/8 1/2 5/8 3/4 7/8 }
 
 : symmetry-value ( c from to -- expr ) swap s- swap s* 2 s/ ;
 
+! The antiderivative at a limit of integration, as a limit when the
+! bound is infinite or the value is undefined there
+:: bound-value ( F x bound -- v/f )
+    bound infinite? [ f ] [ F x bound at-bound ] if
+    dup { [ ] [ defined? ] } 1&& [
+        drop F x bound limit dup limit-expr? [ drop f ] when
+    ] unless ;
+
 PRIVATE>
 
 : integrate ( expr x -- expr' )
@@ -306,8 +338,9 @@ PRIVATE>
 
 :: definite-integrate ( expr x from to -- expr' )
     expr x antiderivative [| F |
-        F x to 2array 1array subs
-        F x from 2array 1array subs s-
+        F x to bound-value
+        F x from bound-value
+        2dup and [ s- ] [ 2drop expr x from to <definite-integral> ] if
     ] [
         expr x from to symmetry-constant-exact
         [ from to symmetry-value ]
@@ -376,6 +409,159 @@ PRIVATE>
 :: definite-by-parts-dv ( expr x from to dv -- expr' )
     x from to expr dv s/ dv definite-by-parts ;
 
+
+<PRIVATE
+
+CONSTANT: max-lhopital-steps 8
+
+: +infinity? ( v -- ? ) infinity-expr = ;
+
+: -infinity? ( v -- ? )
+    dup mul? [ factors>> first2 infinity-expr = swap 0 < and ] [ drop f ] if ;
+
+: infinite-sign ( v -- 1/-1 ) -infinity? -1 1 ? ;
+
+! Extended arithmetic on limit values, outputting f when indeterminate
+:: ext+ ( a b -- v/f )
+    {
+        { [ a not b not or ] [ f ] }
+        { [ a infinite? b infinite? and ] [
+            a infinite-sign b infinite-sign = [ a ] [ f ] if
+        ] }
+        { [ a infinite? ] [ a ] }
+        { [ b infinite? ] [ b ] }
+        [ a b s+ ]
+    } cond ;
+
+:: ext* ( a b -- v/f )
+    {
+        { [ a not b not or ] [ f ] }
+        { [ a infinite? b infinite? or not ] [ a b s* ] }
+        { [ a 0 number= b 0 number= or ] [ f ] }
+        [
+            a infinite? [ a infinite-sign ] [ a ] if
+            b infinite? [ b infinite-sign ] [ b ] if
+            s* dup number? [ 0 < [ infinity-expr sneg ] [ infinity-expr ] if ]
+            [ drop f ] if
+        ]
+    } cond ;
+
+DEFER: (limit)
+
+! numerator and denominator, splitting factors with negative exponents
+:: split-quotient ( expr -- num den )
+    expr mul? [
+        expr factors>> [
+            { [ pow? ] [ exponent>> number? ] [ exponent>> 0 < ] } 1&&
+        ] partition :> ( negatives rest )
+        rest >mul
+        negatives [ [ base>> ] [ exponent>> neg ] bi s^ ] map >mul
+    ] [ expr 1 ] if ;
+
+:: lhopital ( num den x point steps -- v/f )
+    steps 0 <= [ f ] [
+        num x differentiate :> n'
+        den x differentiate :> d'
+        d' 0 number= [ f ] [ n' d' s/ x point steps 1 - (limit) ] if
+    ] if ;
+
+! 0 * infinity as a quotient, so l'Hopital applies
+:: indeterminate-product ( expr x point steps -- v/f )
+    expr factors>> [ x free-of? ] partition :> ( constants deps )
+    deps length 2 = [
+        deps first2 :> ( a b )
+        ! 0*infinity as b/(1/a) or a/(1/b), whichever l'Hopital settles
+        b a -1 s^ x point steps lhopital
+        [ ] [ a b -1 s^ x point steps lhopital ] if*
+        dup [ constants >mul swap ext* ] when
+    ] [ f ] if ;
+
+:: fn-limit ( expr x point steps -- v/f )
+    expr arg>> x point steps (limit) :> u
+    u [
+        u infinite? [
+            u infinite-sign :> sign
+            expr name>> {
+                { "exp" [ sign 1 = [ infinity-expr ] [ 0 ] if ] }
+                { "log" [ sign 1 = [ infinity-expr ] [ f ] if ] }
+                { "atan" [ pi-expr 2 s/ sign s* ] }
+                { "tanh" [ sign ] }
+                { "sinh" [ u ] }
+                { "cosh" [ infinity-expr ] }
+                { "asinh" [ u ] }
+                { "acosh" [ sign 1 = [ infinity-expr ] [ f ] if ] }
+                [ drop f ]
+            } case
+        ] [
+            u 0 number= expr name>> "log" = and
+            [ infinity-expr sneg ]
+            [ u expr name>> apply-fn dup defined? [ ] [ drop f ] if ] if
+        ] if
+    ] [ f ] if ;
+
+:: quotient-limit ( num den x point steps -- v/f )
+    num x point steps (limit) :> n
+    den x point steps (limit) :> d
+    {
+        { [ n not d not or ] [ f ] }
+        { [ d 0 number= n 0 number= and ] [ num den x point steps lhopital ] }
+        { [ n infinite? d infinite? and ] [ num den x point steps lhopital ] }
+        { [ d 0 number= ] [ f ] }
+        { [ d infinite? ] [ n infinite? [ f ] [ 0 ] if ] }
+        { [ n infinite? ] [ n ] }
+        [ n d s/ dup defined? [ ] [ drop f ] if ]
+    } cond ;
+
+:: mul-limit ( expr x point steps -- v/f )
+    expr split-quotient :> ( num den )
+    den 1 number= [
+        expr factors>> [ x point steps (limit) ] map
+        dup [ ] all?
+        [ 1 [ over [ ext* ] [ 2drop f ] if ] reduce ] [ drop f ] if
+        [ ] [ expr x point steps indeterminate-product ] if*
+    ] [ num den x point steps quotient-limit ] if ;
+
+:: pow-limit ( expr x point steps -- v/f )
+    expr base>> x point steps (limit) :> b
+    expr exponent>> x point steps (limit) :> n
+    b n and [
+        {
+            { [ b infinite? n number? and ] [
+                n 0 > [
+                    b infinite-sign -1 = n integer? and n odd? and
+                    [ infinity-expr sneg ] [ infinity-expr ] if
+                ] [ n 0 < [ 0 ] [ f ] if ] if
+            ] }
+            { [ b infinite? n infinite? or ] [ f ] }
+            [ b n s^ dup defined? [ ] [ drop f ] if ]
+        } cond
+    ] [ f ] if ;
+
+:: (limit) ( expr x point steps -- v/f )
+    {
+        { [ expr x free-of? ] [ expr ] }
+        { [ expr x = ] [ point ] }
+        { [ expr add? ] [
+            expr terms>> [ x point steps (limit) ] map
+            dup [ ] all?
+            [ 0 [ over [ ext+ ] [ 2drop f ] if ] reduce ] [ drop f ] if
+        ] }
+        { [ expr fn? ] [ expr x point steps fn-limit ] }
+        { [ expr mul? ] [ expr x point steps mul-limit ] }
+        { [ expr pow? ] [ expr x point steps pow-limit ] }
+        [ expr x point at-bound dup defined? [ ] [ drop f ] if ]
+    } cond ;
+
+PRIVATE>
+
+! The limit of expr as x approaches point, which may be infinity-expr or
+! its negative. Uses substitution, l'Hopital's rule for 0/0 and
+! infinity/infinity, and rewrites 0*infinity as a quotient. Outputs an
+! unevaluated limit-expr when it finds no value.
+:: limit ( expr x point -- expr' )
+    expr x point max-lhopital-steps (limit)
+    [ ] [ expr x point <limit> ] if* ;
+
 ! Differentiation under the integral sign: F'(t), where F(t) is the
 ! definite integral of expr with respect to x.
 :: feynman-derivative ( expr x from to t -- expr' )
@@ -406,6 +592,9 @@ M: pow doit [ base>> doit ] [ exponent>> doit ] bi s^ ;
 M: fn doit [ arg>> doit ] [ name>> ] bi apply-fn ;
 
 M: derivative doit [ expr>> doit ] [ var>> ] bi differentiate ;
+
+M: limit-expr doit
+    [ expr>> doit ] [ var>> ] [ point>> doit ] tri limit ;
 
 M: integral doit
     dup from>> [

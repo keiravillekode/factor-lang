@@ -98,3 +98,44 @@ IN: math.symbolic.tests
 { "tanh(atanh(x) + 1)" } [ symbolic[ x atanh 1 + tanh ] expr>string ] unit-test
 { t } [ symbolic[ 0.5 asin ] symbolic[ pi 6 / ] evalf 1e-12 ~ ] unit-test
 { t } [ symbolic[ 1.0 cosh ] 1.5430806348152437 1e-12 ~ ] unit-test
+
+! Infinity and unevaluated limits
+{ "inf" } [ symbolic[ inf ] expr>string ] unit-test
+{ "-inf" } [ symbolic[ inf neg ] expr>string ] unit-test
+{ t } [ symbolic[ inf ] infinite? ] unit-test
+{ t } [ symbolic[ inf neg ] infinite? ] unit-test
+{ f } [ symbolic[ x ] infinite? ] unit-test
+{ "limit(x*log(x), x, 0)" } [ symbolic[ x x log * x 0 limit ] expr>string ] unit-test
+{ "symbolic[ x x log * x 0 limit ]" } [ symbolic[ x x log * x 0 limit ] unparse ] unit-test
+{ t } [ symbolic[ x 1 + ] defined? ] unit-test
+{ f } [ symbolic[ 1 0 / ] defined? ] unit-test
+{ f } [ symbolic[ 0 log ] defined? ] unit-test
+{ f } [ symbolic[ inf ] defined? ] unit-test
+
+! Exact values at multiples of pi/6 and pi/4
+{ 1/2 } [ symbolic[ pi 6 / sin ] ] unit-test
+{ "sqrt(3)/2" } [ symbolic[ pi 6 / cos ] expr>string ] unit-test
+{ "1/sqrt(3)" } [ symbolic[ pi 6 / tan ] expr>string ] unit-test
+{ "sqrt(3)/2" } [ symbolic[ pi 3 / sin ] expr>string ] unit-test
+{ 1/2 } [ symbolic[ pi 3 / cos ] ] unit-test
+{ "sqrt(3)" } [ symbolic[ pi 3 / tan ] expr>string ] unit-test
+{ "sqrt(3)/2" } [ symbolic[ 2 pi * 3 / sin ] expr>string ] unit-test
+{ -1/2 } [ symbolic[ 2 pi * 3 / cos ] ] unit-test
+{ -1/2 } [ symbolic[ 7 pi * 6 / sin ] ] unit-test
+{ -1/2 } [ symbolic[ pi 6 / neg sin ] ] unit-test
+{ "sqrt(3)/2" } [ symbolic[ pi 6 / neg cos ] expr>string ] unit-test
+{ "tan(pi/2)" } [ symbolic[ pi 2 / tan ] expr>string ] unit-test
+{ 1 } [ symbolic[ pi 6 / sin 2 ^ pi 6 / cos 2 ^ + ] ] unit-test
+{ t } [ symbolic[ pi 3 / sin ] evalf 3 sqrt 2 / 1e-12 ~ ] unit-test
+
+! The inverses give the same angles
+{ "pi/6" } [ symbolic[ 1 2 / asin ] expr>string ] unit-test
+{ "pi/3" } [ symbolic[ 1 2 / acos ] expr>string ] unit-test
+{ "pi/6" } [ symbolic[ 3 sqrt 2 / acos ] expr>string ] unit-test
+{ "pi/3" } [ symbolic[ 3 sqrt 2 / asin ] expr>string ] unit-test
+{ "pi/6" } [ symbolic[ 1 3 sqrt / atan ] expr>string ] unit-test
+{ "pi/3" } [ symbolic[ 3 sqrt atan ] expr>string ] unit-test
+{ "pi/4" } [ symbolic[ 1 2 sqrt / asin ] expr>string ] unit-test
+{ "-pi/6" } [ symbolic[ 1 2 / neg asin ] expr>string ] unit-test
+{ "2*pi/3" } [ symbolic[ 1 2 / neg acos ] expr>string ] unit-test
+{ "-pi/3" } [ symbolic[ 3 sqrt neg atan ] expr>string ] unit-test

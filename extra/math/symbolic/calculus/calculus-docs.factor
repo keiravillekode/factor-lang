@@ -11,12 +11,12 @@ HELP: differentiate
 
 HELP: integrate
 { $values { "expr" "an expression" } { "x" sym } { "expr'" "an expression" } }
-{ $description "An antiderivative of " { $snippet "expr" } " with respect to " { $snippet "x" } ", without a constant of integration, or an unevaluated " { $link integral } " when none is found. Handles powers, and " { $snippet "sin cos tan exp log" } ", the inverse trigonometric functions, and the hyperbolic and inverse hyperbolic functions, of linear arguments, sums, constant factors, " { $snippet "sin^2" } " and " { $snippet "cos^2" } ", polynomials times " { $snippet "exp sin cos log" } " (by parts), exponentials times sines and cosines, and substitution when the rest of a product is a constant times the derivative of an inner expression. " { $snippet "1/x" } " integrates to " { $snippet "log(x)" } ", assuming " { $snippet "x > 0" } "." }
+{ $description "An antiderivative of " { $snippet "expr" } " with respect to " { $snippet "x" } ", without a constant of integration, or an unevaluated " { $link integral } " when none is found. Handles powers, and " { $snippet "sin cos tan exp log" } ", the inverse trigonometric functions, and the hyperbolic and inverse hyperbolic functions, of linear arguments, sums, constant factors, " { $snippet "sin^2" } " and " { $snippet "cos^2" } ", polynomials times " { $snippet "exp sin cos log" } " (by parts), exponentials times sines and cosines, " { $snippet "1/(u^2 + c)" } " as an arc tangent, and substitution when the rest of a product is a constant times the derivative of an inner expression. " { $snippet "1/x" } " integrates to " { $snippet "log(x)" } ", assuming " { $snippet "x > 0" } "." }
 { $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x x exp * ] symbolic[ x ] integrate expr." "x*exp(x) - exp(x)" } } ;
 
 HELP: definite-integrate
 { $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "expr'" "an expression" } }
-{ $description "The definite integral from an antiderivative, or an unevaluated " { $link integral } " when none is found. Singularities in the interval are not detected." }
+{ $description "The definite integral from an antiderivative, or an unevaluated " { $link integral } " when none is found. A bound may be " { $link infinity-expr } " or its negative, and a bound where the antiderivative is undefined is evaluated with " { $link limit } ", so improper integrals work. Singularities inside the interval are not detected." }
 { $examples { $example "USING: math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x sin ] symbolic[ x ] 0 symbolic[ pi ] definite-integrate ." "2" } } ;
 
 HELP: nintegrate
@@ -31,6 +31,15 @@ HELP: gradient
 HELP: jacobian
 { $values { "exprs" { $sequence "expressions" } } { "vars" { $sequence sym } } { "matrix" "a sequence of sequences" } }
 { $description "The Jacobian matrix: one row, the " { $link gradient } ", for each expression." } ;
+
+HELP: limit
+{ $values { "expr" "an expression" } { "x" sym } { "point" "an expression" } { "expr'" "an expression" } }
+{ $description "The limit of " { $snippet "expr" } " as " { $snippet "x" } " approaches " { $snippet "point" } ", which may be " { $link infinity-expr } " or its negative. Uses substitution, the limits of " { $snippet "exp log atan tanh sinh cosh asinh acosh" } " at infinity, l'Hopital's rule for " { $snippet "0/0" } " and " { $snippet "infinity/infinity" } ", and rewrites " { $snippet "0*infinity" } " as a quotient. Outputs an unevaluated " { $link limit-expr } " when it finds no value." }
+{ $notes "One-sided limits are not distinguished; " { $snippet "log(x)" } " at 0 is taken from the right." }
+{ $examples
+    { $example "USING: math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x x log * ] symbolic[ x ] 0 limit ." "0" }
+    { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x atan ] symbolic[ x ] symbolic[ inf ] limit expr." "pi/2" }
+} ;
 
 HELP: definite-by-symmetry
 { $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "expr'" "an expression" } }
@@ -90,6 +99,8 @@ HELP: doit
 ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 "The " { $vocab-link "math.symbolic.calculus" } " vocabulary differentiates and integrates " { $vocab-link "math.symbolic" } " expressions."
 { $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit }
+"Limits:"
+{ $subsections limit }
 "Definite integrals by symmetry, and Feynman's trick:"
 { $subsections definite-by-symmetry feynman-derivative feynman-solve }
 "Integration by parts, one step at a time:"

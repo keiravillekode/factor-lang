@@ -101,15 +101,15 @@ HELP: ssqrt
 
 HELP: ssin
 { $values { "u" "an expression" } { "sin[u]" "an expression" } }
-{ $description "The sine, simplified at multiples of pi/2 and for negated arguments." } ;
+{ $description "The sine, exact at every multiple of pi/6 and pi/4, and simplified for negated arguments." } ;
 
 HELP: scos
 { $values { "u" "an expression" } { "cos[u]" "an expression" } }
-{ $description "The cosine, simplified at multiples of pi/2 and for negated arguments." } ;
+{ $description "The cosine, exact at every multiple of pi/6 and pi/4, and simplified for negated arguments." } ;
 
 HELP: stan
 { $values { "u" "an expression" } { "tan[u]" "an expression" } }
-{ $description "The tangent." } ;
+{ $description "The tangent, exact at every multiple of pi/6 and pi/4 where it is defined, and simplified for negated arguments." } ;
 
 HELP: sexp
 { $values { "u" "an expression" } { "exp[u]" "an expression" } }
@@ -121,15 +121,15 @@ HELP: slog
 
 HELP: sasin
 { $values { "u" "an expression" } { "asin[u]" "an expression" } }
-{ $description "The arc sine, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+{ $description "The arc sine, giving exact angles at 0, 1/2, 1/sqrt(2), sqrt(3)/2 and 1, and simplified for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
 
 HELP: sacos
 { $values { "u" "an expression" } { "acos[u]" "an expression" } }
-{ $description "The arc cosine, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+{ $description "The arc cosine, giving exact angles at 0, 1/2, 1/sqrt(2), sqrt(3)/2 and 1, and simplified for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
 
 HELP: satan
 { $values { "u" "an expression" } { "atan[u]" "an expression" } }
-{ $description "The arc tangent, simplified at 0, 1 and -1, and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+{ $description "The arc tangent, giving exact angles at 0, 1/sqrt(3), 1 and sqrt(3), and simplified for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
 
 HELP: ssinh
 { $values { "u" "an expression" } { "sinh[u]" "an expression" } }
@@ -154,6 +154,24 @@ HELP: sacosh
 HELP: satanh
 { $values { "u" "an expression" } { "atanh[u]" "an expression" } }
 { $description "The inverse hyperbolic tangent, simplified at 0 and for negated arguments. A function applied to its inverse, such as " { $snippet "sinh(asinh(x))" } ", simplifies to the argument." } ;
+
+HELP: infinity-expr
+{ $description "Infinity, written " { $snippet "inf" } " in " { $link POSTPONE: symbolic[ } ". Its negative is " { $snippet "inf neg" } ". Used as a limit of integration and as a limit point." } ;
+
+HELP: infinite?
+{ $values { "expr" "an expression" } { "?" boolean } }
+{ $description "Whether the expression is " { $link infinity-expr } " or a nonzero multiple of it." } ;
+
+HELP: defined?
+{ $values { "expr" "an expression" } { "?" boolean } }
+{ $description "Whether the expression has a value: no division by zero, no " { $snippet "log(0)" } ", no NaN or infinity, and no unevaluated derivative, integral or limit." } ;
+
+HELP: limit-expr
+{ $class-description "An unevaluated limit, built with " { $link <limit> } ". " { $vocab-link "math.symbolic.calculus" } " evaluates it." } ;
+
+HELP: <limit>
+{ $values { "expr" "an expression" } { "var" sym } { "point" "an expression" } { "limit-expr" limit-expr } }
+{ $description "An unevaluated limit of " { $snippet "expr" } " as " { $snippet "var" } " approaches " { $snippet "point" } "." } ;
 
 HELP: apply-fn
 { $values { "arg" "an expression" } { "name" string } { "expr" "an expression" } }
@@ -226,19 +244,19 @@ ARTICLE: "math.symbolic" "Symbolic algebra"
 "The " { $vocab-link "math.symbolic" } " vocabulary represents polynomials, trigonometric, inverse trigonometric, hyperbolic and inverse hyperbolic functions, exponentials, logarithms, their products, and unevaluated derivatives and integrals. Expressions are kept simplified: like terms and powers are combined, numbers are folded exactly, and sums and products are in a canonical order. Calculus is in " { $vocab-link "math.symbolic.calculus" } "."
 $nl
 "Literals:"
-{ $subsections POSTPONE: symbolic[ <sym> <pvar> pi-expr e-expr parse-symbolic-tokens }
+{ $subsections POSTPONE: symbolic[ <sym> <pvar> pi-expr e-expr infinity-expr parse-symbolic-tokens }
 "Arithmetic and functions:"
 { $subsections s+ s- s* s/ s^ sneg ssqrt >add >mul }
 "Functions:"
 { $subsections ssin scos stan sexp slog sasin sacos satan ssinh scosh stanh sasinh sacosh satanh apply-fn }
 "Calculus expressions:"
-{ $subsections <derivative> <integral> <definite-integral> }
+{ $subsections <derivative> <integral> <definite-integral> <limit> }
 "Manipulation and evaluation:"
-{ $subsections subs simplify expand free-of? evalf }
+{ $subsections subs simplify expand free-of? evalf defined? infinite? }
 "Printing:"
 { $subsections expr>string expr. expr>postfix }
 "Expression classes:"
-{ $subsections symbolic sym const add mul pow fn derivative integral pvar }
+{ $subsections symbolic sym const add mul pow fn derivative integral pvar limit-expr }
 "Simplification assumes real variables, so for example " { $snippet "log(exp(x))" } " becomes " { $snippet "x" } "." ;
 
 ABOUT: "math.symbolic"

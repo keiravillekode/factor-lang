@@ -19,8 +19,10 @@ TUPLE: fn name arg ;
 TUPLE: derivative expr var ;
 TUPLE: integral expr var from to ;
 TUPLE: pvar name ;
+TUPLE: limit-expr expr var point ;
 
-UNION: symbolic sym const add mul pow fn derivative integral pvar ;
+UNION: symbolic sym const add mul pow fn derivative integral pvar
+limit-expr ;
 
 : <sym> ( name -- sym ) sym boa ;
 
@@ -30,11 +32,15 @@ CONSTANT: pi-expr T{ const f "pi" }
 
 CONSTANT: e-expr T{ const f "e" }
 
+CONSTANT: infinity-expr T{ const f "inf" }
+
 : <derivative> ( expr var -- derivative ) derivative boa ;
 
 : <integral> ( expr var -- integral ) f f integral boa ;
 
 : <definite-integral> ( expr var from to -- integral ) integral boa ;
+
+: <limit> ( expr var point -- limit-expr ) limit-expr boa ;
 
 ERROR: unbound-symbol name ;
 
@@ -82,6 +88,10 @@ M: derivative unparse-expr
 M: integral unparse-expr
     { [ expr>> ] [ var>> ] [ from>> ] [ to>> ] } cleave 4array sift
     [ expr>string ] map ", " join "integrate(" ")" surround 4 ;
+
+M: limit-expr unparse-expr
+    { [ expr>> ] [ var>> ] [ point>> ] } cleave 3array
+    [ expr>string ] map ", " join "limit(" ")" surround 4 ;
 
 : power-string ( base exponent -- string )
     {
@@ -161,6 +171,50 @@ PRIVATE>
 
 ! Canonical order: in sums, higher degree first and numbers last; in
 ! products, the number first, then variables and their powers by name.
+
+! inf, -inf and any nonzero multiple of them
+: infinite? ( expr -- ? )
+    {
+        { [ dup infinity-expr = ] [ drop t ] }
+        { [ dup mul? ] [
+            factors>> dup length 2 = [ first2 infinity-expr = swap number? and ] [ drop f ] if
+        ] }
+        [ drop f ]
+    } cond ;
+
+! Does the expression have a value: no division by zero, log(0), NaN or
+! infinity?
+GENERIC: defined? ( expr -- ? )
+
+M: object defined? drop t ;
+
+M: float defined?
+    { [ dup = ] [ 1/0. number= not ] [ -1/0. number= not ] } 1&& ;
+
+M: const defined? name>> "inf" = not ;
+
+M: add defined? terms>> [ defined? ] all? ;
+
+M: mul defined? factors>> [ defined? ] all? ;
+
+M:: pow defined? ( expr -- ? )
+    expr base>> :> b
+    expr exponent>> :> n
+    b defined? n defined? and [
+        b 0 number= [ n number? [ n 0 > ] [ f ] if ] [ t ] if
+    ] [ f ] if ;
+
+M:: fn defined? ( expr -- ? )
+    expr arg>> :> u
+    u defined? [
+        expr name>> "log" = [ u 0 number= not ] [ t ] if
+    ] [ f ] if ;
+
+M: derivative defined? drop f ;
+
+M: integral defined? drop f ;
+
+M: limit-expr defined? drop f ;
 
 GENERIC: degree ( expr -- n )
 
@@ -286,9 +340,10 @@ DEFER: s+
 
 <PRIVATE
 
-! k when expr is k*pi for a rational k
+! k when expr is k*pi for a rational k; 0 is 0*pi
 : pi-multiple ( expr -- k/f )
     {
+        { [ dup 0 number= ] [ drop 0 ] }
         { [ dup pi-expr = ] [ drop 1 ] }
         { [ dup mul? ] [
             factors>> dup length 2 = [
@@ -298,53 +353,75 @@ DEFER: s+
         [ drop f ]
     } cond ;
 
-: half-odd? ( k -- ? ) { [ ratio? ] [ denominator 2 = ] } 1&& ;
+! Exact values at multiples of pi/6 and pi/4, keyed by the multiple of pi
+! reduced to [0, 2)
 
-: quarter-odd? ( k -- ? ) { [ ratio? ] [ denominator 4 = ] } 1&& ;
+CONSTANT: sine-table H{
+    { 0 0 } { 1/6 1/2 } { 1/4 T{ pow f 2 -1/2 } } { 1/3 T{ mul f { 1/2 T{ pow f 3 1/2 } } } } { 1/2 1 }
+    { 2/3 T{ mul f { 1/2 T{ pow f 3 1/2 } } } } { 3/4 T{ pow f 2 -1/2 } } { 5/6 1/2 } { 1 0 }
+    { 7/6 -1/2 } { 5/4 T{ mul f { -1 T{ pow f 2 -1/2 } } } } { 4/3 T{ mul f { -1/2 T{ pow f 3 1/2 } } } } { 3/2 -1 }
+    { 5/3 T{ mul f { -1/2 T{ pow f 3 1/2 } } } } { 7/4 T{ mul f { -1 T{ pow f 2 -1/2 } } } } { 11/6 -1/2 }
+}
 
-! 1/sqrt(2), the magnitude of sin and cos at odd multiples of pi/4
-: half-root-2 ( -- expr ) 2 -1/2 pow boa ;
+CONSTANT: cosine-table H{
+    { 0 1 } { 1/6 T{ mul f { 1/2 T{ pow f 3 1/2 } } } } { 1/4 T{ pow f 2 -1/2 } } { 1/3 1/2 } { 1/2 0 }
+    { 2/3 -1/2 } { 3/4 T{ mul f { -1 T{ pow f 2 -1/2 } } } } { 5/6 T{ mul f { -1/2 T{ pow f 3 1/2 } } } } { 1 -1 }
+    { 7/6 T{ mul f { -1/2 T{ pow f 3 1/2 } } } } { 5/4 T{ mul f { -1 T{ pow f 2 -1/2 } } } } { 4/3 -1/2 } { 3/2 0 }
+    { 5/3 1/2 } { 7/4 T{ pow f 2 -1/2 } } { 11/6 T{ mul f { 1/2 T{ pow f 3 1/2 } } } }
+}
+
+! pi/2 and 3*pi/2 are left out: the tangent is undefined there
+CONSTANT: tangent-table H{
+    { 0 0 } { 1/6 T{ pow f 3 -1/2 } } { 1/4 1 } { 1/3 T{ pow f 3 1/2 } }
+    { 2/3 T{ mul f { -1 T{ pow f 3 1/2 } } } } { 3/4 -1 } { 5/6 T{ mul f { -1 T{ pow f 3 -1/2 } } } } { 1 0 }
+    { 7/6 T{ pow f 3 -1/2 } } { 5/4 1 } { 4/3 T{ pow f 3 1/2 } }
+    { 5/3 T{ mul f { -1 T{ pow f 3 1/2 } } } } { 7/4 -1 } { 11/6 T{ mul f { -1 T{ pow f 3 -1/2 } } } }
+}
+
+CONSTANT: arcsine-table H{
+    { 0 0 } { 1/2 T{ mul f { 1/6 T{ const f "pi" } } } } { T{ pow f 2 -1/2 } T{ mul f { 1/4 T{ const f "pi" } } } } { T{ mul f { 1/2 T{ pow f 3 1/2 } } } T{ mul f { 1/3 T{ const f "pi" } } } } { 1 T{ mul f { 1/2 T{ const f "pi" } } } }
+}
+
+CONSTANT: arccosine-table H{
+    { 1 0 } { T{ mul f { 1/2 T{ pow f 3 1/2 } } } T{ mul f { 1/6 T{ const f "pi" } } } } { T{ pow f 2 -1/2 } T{ mul f { 1/4 T{ const f "pi" } } } } { 1/2 T{ mul f { 1/3 T{ const f "pi" } } } } { 0 T{ mul f { 1/2 T{ const f "pi" } } } }
+}
+
+CONSTANT: arctangent-table H{
+    { 0 0 } { T{ pow f 3 -1/2 } T{ mul f { 1/6 T{ const f "pi" } } } } { 1 T{ mul f { 1/4 T{ const f "pi" } } } } { T{ pow f 3 1/2 } T{ mul f { 1/3 T{ const f "pi" } } } }
+}
+
+: reduce-angle ( k -- m ) dup 2 / floor 2 * - ;
+
+: angle-value ( k table -- v/f )
+    over [ [ reduce-angle ] dip at ] [ 2drop f ] if ;
 
 PRIVATE>
 
 :: ssin ( u -- sin[u] )
-    u pi-multiple :> k
+    u pi-multiple sine-table angle-value :> exact
     {
         { [ u float? ] [ u sin ] }
-        { [ u 0 number= ] [ 0 ] }
-        { [ k integer? ] [ 0 ] }
-        { [ k half-odd? ] [ k numerator 4 rem 1 = 1 -1 ? ] }
-        { [ k quarter-odd? ] [
-            half-root-2 k numerator 8 rem 4 < [ ] [ sneg ] if
-        ] }
+        { [ exact ] [ exact ] }
         { [ u negative-term? ] [ u negate-term ssin sneg ] }
         { [ u { [ fn? ] [ name>> "asin" = ] } 1&& ] [ u arg>> ] }
         [ "sin" u fn boa ]
     } cond ;
 
 :: scos ( u -- cos[u] )
-    u pi-multiple :> k
+    u pi-multiple cosine-table angle-value :> exact
     {
         { [ u float? ] [ u cos ] }
-        { [ u 0 number= ] [ 1 ] }
-        { [ k integer? ] [ k even? 1 -1 ? ] }
-        { [ k half-odd? ] [ 0 ] }
-        { [ k quarter-odd? ] [
-            half-root-2 k numerator 8 rem dup 1 = swap 7 = or [ ] [ sneg ] if
-        ] }
+        { [ exact ] [ exact ] }
         { [ u negative-term? ] [ u negate-term scos ] }
         { [ u { [ fn? ] [ name>> "acos" = ] } 1&& ] [ u arg>> ] }
         [ "cos" u fn boa ]
     } cond ;
 
 :: stan ( u -- tan[u] )
+    u pi-multiple tangent-table angle-value :> exact
     {
         { [ u float? ] [ u tan ] }
-        { [ u 0 number= ] [ 0 ] }
-        { [ u pi-multiple integer? ] [ 0 ] }
-        { [ u pi-multiple quarter-odd? ] [
-            u pi-multiple numerator 8 rem dup 1 = swap 5 = or 1 -1 ?
-        ] }
+        { [ exact ] [ exact ] }
         { [ u negative-term? ] [ u negate-term stan sneg ] }
         { [ u { [ fn? ] [ name>> "atan" = ] } 1&& ] [ u arg>> ] }
         [ "tan" u fn boa ]
@@ -369,32 +446,30 @@ PRIVATE>
     } cond ;
 
 :: sasin ( u -- asin[u] )
+    u arcsine-table at :> exact
     {
         { [ u float? ] [ u asin ] }
-        { [ u 0 number= ] [ 0 ] }
-        { [ u 1 number= ] [ pi-expr 2 s/ ] }
-        { [ u -1 number= ] [ pi-expr -2 s/ ] }
+        { [ exact ] [ exact ] }
         { [ u { [ fn? ] [ name>> "sin" = ] } 1&& ] [ "asin" u fn boa ] }
         { [ u negative-term? ] [ u negate-term sasin sneg ] }
         [ "asin" u fn boa ]
     } cond ;
 
 :: sacos ( u -- acos[u] )
+    u arccosine-table at :> exact
     {
         { [ u float? ] [ u acos ] }
-        { [ u 0 number= ] [ pi-expr 2 s/ ] }
-        { [ u 1 number= ] [ 0 ] }
+        { [ exact ] [ exact ] }
         { [ u -1 number= ] [ pi-expr ] }
         { [ u negative-term? ] [ pi-expr u negate-term sacos s- ] }
         [ "acos" u fn boa ]
     } cond ;
 
 :: satan ( u -- atan[u] )
+    u arctangent-table at :> exact
     {
         { [ u float? ] [ u atan ] }
-        { [ u 0 number= ] [ 0 ] }
-        { [ u 1 number= ] [ pi-expr 4 s/ ] }
-        { [ u -1 number= ] [ pi-expr -4 s/ ] }
+        { [ exact ] [ exact ] }
         { [ u negative-term? ] [ u negate-term satan sneg ] }
         [ "atan" u fn boa ]
     } cond ;
@@ -500,6 +575,13 @@ M: integral (subs)
         [ [ to>> ] dip over [ subs ] [ drop ] if ]
     } 2cleave integral boa ;
 
+M: limit-expr (subs)
+    {
+        [ [ expr>> ] dip subs ]
+        [ drop var>> ]
+        [ [ point>> ] dip subs ]
+    } 2cleave <limit> ;
+
 PRIVATE>
 
 : subs ( expr assoc -- expr' )
@@ -524,6 +606,9 @@ M: derivative free-of? [ expr>> ] dip free-of? ;
 M: integral free-of?
     [ [ expr>> ] [ from>> ] [ to>> ] tri 3array sift ] dip '[ _ free-of? ] all? ;
 
+M: limit-expr free-of?
+    [ [ expr>> ] [ point>> ] bi 2array ] dip '[ _ free-of? ] all? ;
+
 GENERIC: evalf ( expr -- number )
 
 M: number evalf >float ;
@@ -532,7 +617,7 @@ M: sym evalf name>> unbound-symbol ;
 
 M: pvar evalf name>> "?" prepend unbound-symbol ;
 
-M: const evalf name>> "pi" = pi e ? ;
+M: const evalf name>> { { "pi" [ pi ] } { "e" [ e ] } [ drop 1/0. ] } case ;
 
 M: add evalf terms>> [ evalf ] map-sum ;
 
@@ -545,6 +630,8 @@ M: fn evalf [ arg>> evalf ] [ name>> ] bi apply-fn ;
 M: derivative evalf unevaluated-expression ;
 
 M: integral evalf unevaluated-expression ;
+
+M: limit-expr evalf unevaluated-expression ;
 
 <PRIVATE
 
@@ -602,6 +689,8 @@ CONSTANT: symbolic-words H{
     { "atanh" { 1 [ first satanh ] } }
     { "pi" { 0 [ drop pi-expr ] } }
     { "e" { 0 [ drop e-expr ] } }
+    { "inf" { 0 [ drop infinity-expr ] } }
+    { "limit" { 3 [ first3 <limit> ] } }
     { "D" { 2 [ first2 <derivative> ] } }
     { "integral" { 2 [ first2 <integral> ] } }
     { "definite-integral" { 4 [ first4 <definite-integral> ] } }
@@ -653,6 +742,10 @@ M: pow (postfix) [ base>> (postfix) ] [ exponent>> (postfix) ] bi "^" , ;
 M: fn (postfix) [ arg>> (postfix) ] [ name>> , ] bi ;
 
 M: derivative (postfix) [ expr>> (postfix) ] [ var>> (postfix) ] bi "D" , ;
+
+M: limit-expr (postfix)
+    [ expr>> (postfix) ] [ var>> (postfix) ] [ point>> (postfix) ] tri
+    "limit" , ;
 
 M: integral (postfix)
     dup from>> [

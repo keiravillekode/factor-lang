@@ -13,7 +13,7 @@ permissions:
 
 env:
   LOAD_ALL: 'USING: compiler.errors memory namespaces parser.notes syntax vocabs.hierarchy ; parser-quiet? off auto-use? off load-all save compiler-errors get assoc-empty? 0 1 ? exit'
-  STRESS: 'USING: parser words kernel ; "resource:.github/scripts/arm64-reloc-stress.factor" run-file { 2000 10000 30000 50000 70000 } [ "run" "arm64-reloc-stress" lookup-word execute( n -- ) ] each'
+  STRESS: 'USING: parser words kernel sequences ; "resource:.github/scripts/arm64-reloc-stress.factor" run-file { 2000 10000 30000 50000 70000 } [ "run" "arm64-reloc-stress" lookup-word execute( n -- ) ] each'
 
 jobs:
   cpp-arm64:
@@ -32,6 +32,7 @@ jobs:
     - name: test
       run: ./factor -run=tools.test resource:core compiler threads io > test.log 2>&1 || (tail -60 test.log; exit 1)
     - name: stress
+      if: always()
       continue-on-error: true
       run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
     - name: summary
@@ -71,6 +72,7 @@ jobs:
     - name: test
       run: ./factor -run=tools.test resource:core compiler threads io > test.log 2>&1 || (tail -60 test.log; exit 1)
     - name: stress
+      if: always()
       continue-on-error: true
       run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
     - name: summary

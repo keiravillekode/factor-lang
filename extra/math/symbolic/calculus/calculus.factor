@@ -305,7 +305,16 @@ DEFER: (integrate)
 :: symmetry-sum ( expr x from to -- g )
     expr x from to s+ x s- at-bound expr s+ ;
 
-CONSTANT: symmetry-sample-fractions { 1/8 1/4 3/8 1/2 5/8 3/4 7/8 }
+! Sample points spread by the golden ratio. A grid of simple
+! fractions resonates with periodic integrands: every eighth of
+! [0,1] is a peak of cos(16*pi*x), so the sum looked constant when
+! it is not. These points share no period with such an integrand.
+CONSTANT: symmetry-sample-fractions {
+    0.6180339887498949 0.2360679774997898 0.8541019662496847
+    0.4721359549995796 0.09016994374947451 0.7082039324993694
+    0.3262379212492643 0.9442719099991592 0.5623058987490541
+    0.18033988749894903 0.7983738762488457 0.41640786499873883
+}
 
 :: constant-between? ( g c x from to -- ? )
     [

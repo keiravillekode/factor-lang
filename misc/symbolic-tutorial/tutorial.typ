@@ -493,8 +493,8 @@ symbolic[ 3 2 / gamma ] expr.
 
 $ integral_0^(pi\/4) log(1 + tan x) dif x = (pi log 2)/8 $
 
-Here $f(x) + f(a + b - x)$ is constant, so the integral is
-$(b - a) c \/ 2$ without any antiderivative.
+Here $f(x) + f(pi\/4 - x)$ is constant, so the integral follows from
+that constant and the width of the interval, with no antiderivative.
 
 ```factor
 symbolic[ 1 x tan + log ] symbolic[ x ] 0 symbolic[ pi 4 / ]

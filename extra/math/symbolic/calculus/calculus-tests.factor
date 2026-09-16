@@ -361,3 +361,13 @@ PRIVATE>
 ! A fractional power at the zero bound, which needs 0^(3/2) to fold
 { 2/3 } [ symbolic[ x sqrt ] x-sym 0 1 definite-integrate ] unit-test
 { 2/5 } [ symbolic[ x 3/2 ^ ] x-sym 0 1 definite-integrate ] unit-test
+
+! A periodic integrand must not be mistaken for a symmetric constant.
+! The sum is 2*cos(16*pi*x), which equals 2 at every eighth of [0,1].
+{ f } [ symbolic[ 16 pi * x * cos ] x-sym 0 1 definite-by-symmetry 1 = ] unit-test
+{ 0 } [ symbolic[ 16 pi * x * cos ] x-sym 0 1 definite-integrate ] unit-test
+! The symmetry rule still fires where the sum really is constant
+{ "log(2)*pi/8" } [
+    symbolic[ 1 x tan + log ] x-sym 0 symbolic[ pi 4 / ]
+    definite-by-symmetry expr>string
+] unit-test

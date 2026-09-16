@@ -59,8 +59,8 @@ HELP: limit
 
 HELP: definite-by-symmetry
 { $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "expr'" "an expression" } }
-{ $description "The definite integral from the symmetry " { $snippet "f(x) + f(a + b - x) = c" } ", which gives " { $snippet "(b - a)*c/2" } ". " { $snippet "c" } " is the sum at " { $snippet "from" } ", that is " { $snippet "f(a) + f(b)" } ". Outputs the unevaluated " { $link integral } " when the sum is not constant." }
-{ $notes "When the sum is not symbolically constant, it is only checked numerically, at seven points of the interval, so the result is not a proof. " { $link definite-integrate } " uses this only in the symbolically exact case." }
+{ $description "The definite integral from the symmetry " { $snippet "f(x) + f(from + to - x) = c" } ", which gives " { $snippet "(to - from)*c/2" } ". " { $snippet "c" } " is the sum at " { $snippet "from" } ", that is " { $snippet "f(from) + f(to)" } ". Outputs the unevaluated " { $link integral } " when the sum is not constant." }
+{ $notes "When the sum is not symbolically constant, it is only checked numerically, at twelve points of the interval spread by the golden ratio, so the result is not a proof. The points avoid sharing a period with the integrand: a grid of simple fractions agrees at every point with a periodic integrand that repeats over that same grid. " { $link definite-integrate } " uses this only in the symbolically exact case." }
 { $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ 1 x tan + log ] symbolic[ x ] 0 symbolic[ pi 4 / ]\ndefinite-by-symmetry expr." "log(2)*pi/8" } } ;
 
 HELP: feynman-derivative

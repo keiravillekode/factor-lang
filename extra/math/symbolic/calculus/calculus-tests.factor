@@ -211,3 +211,35 @@ PRIVATE>
 { "pi/2" } [ symbolic[ x 2 ^ 1 + -1 ^ ] x-sym 0 symbolic[ inf ] definite-integrate expr>string ] unit-test
 { "inf" } [ symbolic[ 1 x / ] x-sym 1 symbolic[ inf ] definite-integrate expr>string ] unit-test
 { -1 } [ symbolic[ x log ] x-sym 0 1 definite-integrate ] unit-test
+
+! The Gaussian integral
+{ "sqrt(pi)" } [
+    symbolic[ x 2 ^ neg exp ] x-sym symbolic[ inf neg ] symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test
+{ "3*sqrt(pi)" } [
+    symbolic[ x 5 - 2 ^ 9 / neg exp ] x-sym symbolic[ inf neg ] symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test
+{ "2*sqrt(pi)" } [
+    symbolic[ 2 x 2 ^ neg exp * ] x-sym symbolic[ inf neg ] symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test
+{ t } [
+    symbolic[ x 2 ^ 2 / neg exp ] x-sym symbolic[ inf neg ] symbolic[ inf ]
+    definite-integrate evalf 2 pi * sqrt 1e-9 ~
+] unit-test
+{ "sqrt(pi)/2" } [
+    symbolic[ x 2 ^ neg exp ] x-sym 0 symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test
+! A half line with a linear term needs the error function
+{ t } [
+    symbolic[ x 5 - 2 ^ neg exp ] x-sym 0 symbolic[ inf ]
+    definite-integrate integral?
+] unit-test
+! Not a Gaussian: the exponent is linear, and the integral diverges
+{ "inf" } [
+    symbolic[ x neg exp ] x-sym symbolic[ inf neg ] symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test

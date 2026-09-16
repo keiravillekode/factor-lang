@@ -16,8 +16,11 @@ HELP: integrate
 
 HELP: definite-integrate
 { $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "expr'" "an expression" } }
-{ $description "The definite integral from an antiderivative, or an unevaluated " { $link integral } " when none is found. A bound may be " { $link infinity-expr } " or its negative, and a bound where the antiderivative is undefined is evaluated with " { $link limit } ", so improper integrals work. Singularities inside the interval are not detected." }
-{ $examples { $example "USING: math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x sin ] symbolic[ x ] 0 symbolic[ pi ] definite-integrate ." "2" } } ;
+{ $description "The definite integral from an antiderivative, or an unevaluated " { $link integral } " when none is found. A bound may be " { $link infinity-expr } " or its negative, and a bound where the antiderivative is undefined is evaluated with " { $link limit } ", so improper integrals work. Gaussian integrals are recognized: " { $snippet "k*exp(-a*x^2 + b*x + c)" } " over the whole line is " { $snippet "k*sqrt(pi/a)*exp(b^2/(4*a) + c)" } ", and half that over a half line when " { $snippet "b" } " is 0. Singularities inside the interval are not detected." }
+{ $examples
+    { $example "USING: math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x sin ] symbolic[ x ] 0 symbolic[ pi ] definite-integrate ." "2" }
+    { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x 5 - 2 ^ 9 / neg exp ] symbolic[ x ]\nsymbolic[ inf neg ] symbolic[ inf ] definite-integrate expr." "3*sqrt(pi)" }
+} ;
 
 HELP: nintegrate
 { $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "value" float } }

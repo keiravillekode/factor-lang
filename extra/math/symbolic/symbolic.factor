@@ -248,6 +248,15 @@ M: mul degree factors>> [ degree ] map-sum ;
 
 PRIVATE>
 
+! The exact square root of a positive rational, or f
+:: exact-sqrt ( n -- root/f )
+    n { [ rational? ] [ 0 > ] } 1&& [
+        n >fraction :> ( numerator denominator )
+        numerator sqrt >integer :> a
+        denominator sqrt >integer :> b
+        a a * numerator = b b * denominator = and [ a b / ] [ f ] if
+    ] [ f ] if ;
+
 DEFER: s*
 DEFER: s^
 DEFER: sexp
@@ -317,6 +326,15 @@ DEFER: s+
         { [ base number? exponent integer? and ] [
             base 0 number= exponent 0 < and
             [ base exponent pow boa ] [ base exponent ^ ] if
+        ] }
+        { [ exponent 1/2 number= base number? and base exact-sqrt and ] [
+            base exact-sqrt
+        ] }
+        { [ exponent 1/2 number= base mul? and ] [
+            base split-coefficient :> ( coefficient factors )
+            coefficient 1 number= [ f ] [ coefficient exact-sqrt ] if :> root
+            root
+            [ root factors >mul 1/2 s^ s* ] [ base exponent pow boa ] if
         ] }
         { [ base float? exponent number? and ] [ base exponent ^ ] }
         { [ base number? exponent float? and ] [ base exponent ^ ] }

@@ -290,6 +290,13 @@ DEFER: (integrate)
 : antiderivative ( expr x -- F/f )
     0 integration-depth [ (integrate) ] with-variable ;
 
+: +infinity? ( v -- ? ) infinity-expr = ;
+
+: -infinity? ( v -- ? )
+    dup mul? [ factors>> first2 infinity-expr = swap 0 < and ] [ drop f ] if ;
+
+: infinite-sign ( v -- 1/-1 ) -infinity? -1 1 ? ;
+
 : at-bound ( expr x bound -- expr' ) 2array 1array subs ;
 
 ! f(x) + f(a + b - x), which is constant when the graph is symmetric
@@ -323,6 +330,44 @@ CONSTANT: symmetry-sample-fractions { 1/8 1/4 3/8 1/2 5/8 3/4 7/8 }
 
 : symmetry-value ( c from to -- expr ) swap s- swap s* 2 s/ ;
 
+! expr as constant * exp(q), where the constant is free of x
+:: gaussian-form ( expr x -- constant/f q/f )
+    {
+        { [ expr "exp" fn-named? ] [ 1 expr arg>> ] }
+        { [ expr mul? ] [
+            expr factors>> [ "exp" fn-named? ] partition :> ( exponentials rest )
+            exponentials length 1 = rest [ x free-of? ] all? and
+            [ rest >mul exponentials first arg>> ] [ f f ] if
+        ] }
+        [ f f ]
+    } cond ;
+
+! The integral of k*exp(-a*x^2 + b*x + c) over the whole line is
+! k*sqrt(pi/a)*exp(b^2/(4*a) + c); over a half line it is half that,
+! but only when b is 0, since otherwise it needs the error function.
+:: gaussian-integral ( expr x from to -- v/f )
+    from infinite? to infinite? or [
+        expr x gaussian-form :> ( k q )
+        q [
+            q x differentiate x differentiate :> second
+            second number? [ second 0 < ] [ f ] if [
+                second -2 / :> a
+                q x differentiate x 0 at-bound :> b
+                q x 0 at-bound :> c
+                k pi-expr a s/ ssqrt s* b b s* 4 a s* s/ c s+ sexp s* :> whole
+                {
+                    { [ from infinite? to infinite? and ] [
+                        from infinite-sign to infinite-sign = [ f ] [ whole ] if
+                    ] }
+                    { [ b 0 number= not ] [ f ] }
+                    { [ from 0 number= to infinite? and ] [ whole 2 s/ ] }
+                    { [ to 0 number= from infinite? and ] [ whole 2 s/ ] }
+                    [ f ]
+                } cond
+            ] [ f ] if
+        ] [ f ] if
+    ] [ f ] if ;
+
 ! The antiderivative at a limit of integration, as a limit when the
 ! bound is infinite or the value is undefined there
 :: bound-value ( F x bound -- v/f )
@@ -342,9 +387,11 @@ PRIVATE>
         F x from bound-value
         2dup and [ s- ] [ 2drop expr x from to <definite-integral> ] if
     ] [
-        expr x from to symmetry-constant-exact
-        [ from to symmetry-value ]
-        [ expr x from to <definite-integral> ] if*
+        expr x from to gaussian-integral [ ] [
+            expr x from to symmetry-constant-exact
+            [ from to symmetry-value ]
+            [ expr x from to <definite-integral> ] if*
+        ] if*
     ] if* ;
 
 ! The definite integral from the symmetry f(x) + f(a + b - x) = c, which
@@ -413,13 +460,6 @@ PRIVATE>
 <PRIVATE
 
 CONSTANT: max-lhopital-steps 8
-
-: +infinity? ( v -- ? ) infinity-expr = ;
-
-: -infinity? ( v -- ? )
-    dup mul? [ factors>> first2 infinity-expr = swap 0 < and ] [ drop f ] if ;
-
-: infinite-sign ( v -- 1/-1 ) -infinity? -1 1 ? ;
 
 ! Extended arithmetic on limit values, outputting f when indeterminate
 :: ext+ ( a b -- v/f )

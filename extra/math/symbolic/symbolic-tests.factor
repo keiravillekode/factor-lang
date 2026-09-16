@@ -139,3 +139,10 @@ IN: math.symbolic.tests
 { "-pi/6" } [ symbolic[ 1 2 / neg asin ] expr>string ] unit-test
 { "2*pi/3" } [ symbolic[ 1 2 / neg acos ] expr>string ] unit-test
 { "-pi/3" } [ symbolic[ 3 sqrt neg atan ] expr>string ] unit-test
+
+! Square roots of perfect squares
+{ 3 } [ symbolic[ 9 sqrt ] ] unit-test
+{ 2/3 } [ symbolic[ 4 9 / sqrt ] ] unit-test
+{ "3*sqrt(pi)" } [ symbolic[ 9 pi * sqrt ] expr>string ] unit-test
+{ "sqrt(2)" } [ symbolic[ 2 sqrt ] expr>string ] unit-test
+{ "2*sqrt(x)" } [ symbolic[ 4 x * sqrt ] expr>string ] unit-test

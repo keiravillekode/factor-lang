@@ -27,6 +27,7 @@ boot.*.image.*
 .gdb_history
 .vs
 /factor
+/factor-test
 /logs
 /work
 Factor.app/Contents/MacOS/factor

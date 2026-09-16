@@ -370,6 +370,25 @@ endif
 
 factor-ffi-test: $(FFI_TEST_LIBRARY)
 
+# VM unit tests: vm/tests/*.cpp linked against the same objects as the VM.
+UNIT_TEST_SRCS := $(wildcard vm/tests/*.cpp)
+UNIT_TEST_OBJS := $(patsubst vm/tests/%.cpp,$(BUILD_DIR)/tests/%.o,$(UNIT_TEST_SRCS))
+UNIT_TEST_EXECUTABLE := factor-test$(EXE_SUFFIX)$(EXE_EXTENSION)
+
+$(BUILD_DIR)/tests:
+	@mkdir -p $(BUILD_DIR)/tests
+
+$(BUILD_DIR)/tests/%.o: vm/tests/%.cpp vm/tests/harness.hpp vm/tests/test_vm.hpp $(BUILD_DIR)/master.hpp.gch | $(BUILD_DIR)/tests
+	$(TOOLCHAIN_PREFIX)$(CXX) -c $(CXXFLAGS) $(PCHFLAGS) -o $@ $<
+
+$(UNIT_TEST_EXECUTABLE): $(UNIT_TEST_OBJS) $(DLL_OBJS)
+	$(TOOLCHAIN_PREFIX)$(CXX) -L. $(DLL_OBJS) $(CXXFLAGS) $(LDFLAGS) -o $@ $(LIBS) $(UNIT_TEST_OBJS)
+
+factor-test: $(UNIT_TEST_EXECUTABLE)
+
+test: factor-test
+	./$(UNIT_TEST_EXECUTABLE)
+
 .SUFFIXES: .mm
 
 endif
@@ -382,7 +401,7 @@ clean:
 	rm -f build/*.gch
 	rm -f vm/*.o
 	rm -f vm/*.gch
-	rm -f factor factor.com factor.exe
+	rm -f factor factor.com factor.exe factor-test factor-test.exe
 	rm -f factor.dll
 	rm -f factor.lib
 	rm -f factor.dll.lib
@@ -390,5 +409,5 @@ clean:
 	rm -f libfactor-ffi-test.*
 	rm -f Factor.app/Contents/Frameworks/libfactor.dylib
 
-.PHONY: factor-executable factor-lib factor-console factor-ffi-test tags clean help macos.app
+.PHONY: factor-executable factor-lib factor-console factor-ffi-test factor-test test tags clean help macos.app
 .PHONY: linux-x86-32 linux-x86-64 linux-ppc-32 linux-ppc-64 linux-arm-64 freebsd-x86-32 freebsd-x86-64 macos-x86-32 macos-x86-64 macos-x86-fat macos-arm64 windows-x86-32 windows-x86-64 windows-arm-64

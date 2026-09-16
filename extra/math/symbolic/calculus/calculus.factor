@@ -449,6 +449,10 @@ CONSTANT: compile-nintegrate-steps 1000
 : jacobian ( exprs vars -- matrix )
     '[ _ gradient ] map ;
 
+! The matrix of second partial derivatives, the jacobian of the gradient
+: hessian ( expr vars -- matrix )
+    [ gradient ] keep jacobian ;
+
 ERROR: no-antiderivative expr var ;
 
 <PRIVATE

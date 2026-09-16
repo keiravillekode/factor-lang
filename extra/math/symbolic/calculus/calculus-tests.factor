@@ -8,6 +8,11 @@ IN: math.symbolic.calculus.tests
 
 : x-sym ( -- sym ) "x" <sym> ;
 
+:: det2 ( matrix -- expr )
+    matrix first first2 :> ( a b )
+    matrix second first2 :> ( c d )
+    a d s* b c s* s- ;
+
 ! integrate finds an antiderivative whose derivative equals the
 ! integrand at several points.
 :: antiderivative-checks-at? ( integrand points -- ? )
@@ -317,4 +322,30 @@ PRIVATE>
 ! The derivative of gamma is left unevaluated
 { "D(gamma(x^2), x)" } [
     symbolic[ x 2 ^ gamma ] x-sym differentiate expr>string
+] unit-test
+
+! Hessian matrices
+{ { { "6*x" "-3" } { "-3" "6*y" } } } [
+    symbolic[ x 3 ^ 3 x * y * - y 3 ^ + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    [ [ expr>string ] map ] map
+] unit-test
+{ { { "2" "0" } { "0" "2" } } } [
+    symbolic[ x 2 ^ y 2 ^ + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    [ [ expr>string ] map ] map
+] unit-test
+! Mixed partials are equal
+{ t } [
+    symbolic[ x 2 ^ y 3 ^ * x y * + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    first second
+    symbolic[ x 2 ^ y 3 ^ * x y * + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    second first =
+] unit-test
+! The second derivative test at a critical point of x^3 - 3xy + y^3
+{ 27 } [
+    symbolic[ x 3 ^ 3 x * y * - y 3 ^ + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    det2 { { T{ sym f "x" } 1 } { T{ sym f "y" } 1 } } subs
+] unit-test
+{ -9 } [
+    symbolic[ x 3 ^ 3 x * y * - y 3 ^ + ] { T{ sym f "x" } T{ sym f "y" } } hessian
+    det2 { { T{ sym f "x" } 0 } { T{ sym f "y" } 0 } } subs
 ] unit-test

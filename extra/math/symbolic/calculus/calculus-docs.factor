@@ -117,6 +117,11 @@ HELP: definite-by-parts-dv
 HELP: no-antiderivative
 { $error-description "Thrown by the integration by parts words when no antiderivative of " { $snippet "dv" } " is found." } ;
 
+HELP: hessian
+{ $values { "expr" "an expression" } { "vars" { $sequence sym } } { "matrix" "a sequence of sequences" } }
+{ $description "The Hessian matrix of second partial derivatives: the " { $link jacobian } " of the " { $link gradient } ". The matrix is symmetric for expressions with continuous second derivatives." }
+{ $examples { $example "USING: kernel math.symbolic math.symbolic.calculus sequences ;" "symbolic[ x 3 ^ 3 x * y * - y 3 ^ + ]\n{ T{ sym f \"x\" } T{ sym f \"y\" } } hessian [ [ expr. ] each ] each" "6*x\n-3\n-3\n6*y" } } ;
+
 HELP: doit
 { $values { "expr" "an expression" } { "expr'" "an expression" } }
 { $description "Evaluates the unevaluated derivatives and integrals in an expression." }
@@ -124,7 +129,7 @@ HELP: doit
 
 ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 "The " { $vocab-link "math.symbolic.calculus" } " vocabulary differentiates and integrates " { $vocab-link "math.symbolic" } " expressions."
-{ $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit }
+{ $subsections differentiate gradient jacobian hessian integrate definite-integrate nintegrate doit }
 "Limits and series:"
 { $subsections limit taylor maclaurin undefined-at-point }
 "Definite integrals by symmetry, and Feynman's trick:"

@@ -269,3 +269,38 @@ PRIVATE>
 ! log(x) has no Taylor series about 0: taylor throws undefined-at-point.
 ! Not asserted here, because the compiler folds the call at compile time,
 ! so the error is raised while the test is compiled rather than run.
+
+! Integration by a user-chosen substitution
+{ "exp(x^2)" } [
+    symbolic[ 2 x * x 2 ^ exp * ] x-sym symbolic[ x 2 ^ ] by-substitution expr>string
+] unit-test
+{ "log(x^2 + 1)/2" } [
+    symbolic[ x x 2 ^ 1 + / ] x-sym symbolic[ x 2 ^ 1 + ] by-substitution expr>string
+] unit-test
+! sin(x)/cos(x) fits u = cos(x); tan(x) does not, because the simplifier
+! keeps tan as it is, so nothing in the integrand mentions cos(x)
+{ "-log(cos(x))" } [
+    symbolic[ x sin x cos / ] x-sym symbolic[ x cos ] by-substitution expr>string
+] unit-test
+{ t } [
+    symbolic[ x tan ] x-sym symbolic[ x cos ] by-substitution integral?
+] unit-test
+{ "sin(x)^2/2" } [
+    symbolic[ x sin x cos * ] x-sym symbolic[ x sin ] by-substitution expr>string
+] unit-test
+! A substitution that does not fit leaves the integral unevaluated
+{ t } [
+    symbolic[ x sin ] x-sym symbolic[ x 2 ^ ] by-substitution integral?
+] unit-test
+! Definite integrals substitute the limits too
+{ t } [
+    symbolic[ 2 x * x 2 ^ exp * ] x-sym 0 1 symbolic[ x 2 ^ ] definite-by-substitution
+    symbolic[ e 1 - ] =
+] unit-test
+{ 1/2 } [
+    symbolic[ x sin x cos * ] x-sym 0 symbolic[ pi 2 / ] symbolic[ x sin ]
+    definite-by-substitution
+] unit-test
+{ t } [
+    symbolic[ x sin ] x-sym 0 1 symbolic[ x 2 ^ ] definite-by-substitution integral?
+] unit-test

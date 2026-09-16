@@ -72,6 +72,16 @@ HELP: feynman-solve
 { $description "Feynman's trick: recovers " { $snippet "F(t)" } ", the definite integral of " { $snippet "expr" } " over " { $snippet "x" } ", from " { $link feynman-derivative } " and the value at " { $snippet "t0" } ", as " { $snippet "G(t) - G(t0) + F(t0)" } " for an antiderivative " { $snippet "G" } " of " { $snippet "F'" } ". Outputs the unevaluated " { $link integral } " when any step has no closed form." }
 { $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ t x 2 ^ * x + ] symbolic[ x ] 0 1 symbolic[ t ] 0\nfeynman-solve expr." "t/3 + 1/2" } } ;
 
+HELP: by-substitution
+{ $values { "expr" "an expression" } { "x" sym } { "u" "an expression" } { "expr'" "an expression" } }
+{ $description "Integrates " { $snippet "expr" } " by the substitution " { $snippet "u = g(x)" } ": divides by " { $snippet "u'" } ", writes occurrences of " { $snippet "g(x)" } " as a new variable, integrates, and substitutes back. Outputs the unevaluated " { $link integral } " when the result still mentions " { $snippet "x" } ", or when the integral in the new variable is not found." }
+{ $notes "The integrand must mention " { $snippet "g(x)" } " after dividing by " { $snippet "u'" } ". For example " { $snippet "sin(x)/cos(x)" } " fits " { $snippet "u = cos(x)" } ", but the equal expression " { $snippet "tan(x)" } " does not, because the simplifier keeps " { $snippet "tan" } " as it is." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x sin x cos / ] symbolic[ x ] symbolic[ x cos ]\nby-substitution expr." "-log(cos(x))" } } ;
+
+HELP: definite-by-substitution
+{ $values { "expr" "an expression" } { "x" sym } { "from" "an expression" } { "to" "an expression" } { "u" "an expression" } { "expr'" "an expression" } }
+{ $description "Like " { $link by-substitution } " for a definite integral: the limits become " { $snippet "u(from)" } " and " { $snippet "u(to)" } ", so there is no substituting back." } ;
+
 HELP: by-parts
 { $values { "x" sym } { "u" "an expression" } { "dv" "an expression" } { "expr'" "an expression" } }
 { $description "Integrates " { $snippet "u*dv" } " by parts: " { $snippet "u*v - integrate(v*u', x)" } ", where " { $snippet "v" } " is an antiderivative of " { $snippet "dv" } ". The remaining integral is left unevaluated; " { $link doit } " evaluates it. It is omitted when " { $snippet "u" } " is constant." }
@@ -119,6 +129,8 @@ ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 { $subsections limit taylor maclaurin undefined-at-point }
 "Definite integrals by symmetry, and Feynman's trick:"
 { $subsections definite-by-symmetry feynman-derivative feynman-solve }
+"Integration by a chosen substitution:"
+{ $subsections by-substitution definite-by-substitution }
 "Integration by parts, one step at a time:"
 { $subsections by-parts by-parts-u by-parts-dv definite-by-parts definite-by-parts-u definite-by-parts-dv no-antiderivative } ;
 

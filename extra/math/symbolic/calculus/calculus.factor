@@ -619,6 +619,26 @@ PRIVATE>
         ] [ expr x from to <definite-integral> ] if*
     ] if ;
 
+! Integration by the substitution u = g(x): the integrand divided by
+! u' must be free of x once occurrences of g(x) are written as u.
+:: substitution-integrand ( expr x u -- integrand/f t/f )
+    "%s" <sym> :> t
+    expr u x differentiate s/ u t 2array 1array subs :> integrand
+    integrand x free-of? [ integrand t ] [ f f ] if ;
+
+:: by-substitution ( expr x u -- expr' )
+    expr x u substitution-integrand :> ( integrand t )
+    integrand [
+        integrand t antiderivative
+        [ t u 2array 1array subs ] [ expr x <integral> ] if*
+    ] [ expr x <integral> ] if ;
+
+:: definite-by-substitution ( expr x from to u -- expr' )
+    expr x u substitution-integrand :> ( integrand t )
+    integrand [
+        integrand t u x from at-bound u x to at-bound definite-integrate
+    ] [ expr x from to <definite-integral> ] if ;
+
 ERROR: undefined-at-point expr var point ;
 
 ! The Taylor polynomial of expr about point, up to the term in

@@ -2,8 +2,8 @@
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors arrays assocs combinators
 combinators.short-circuit continuations kernel math
-math.numerical-integration math.symbolic math.symbolic.compile
-namespaces sequences words ;
+math.combinatorics math.numerical-integration math.symbolic
+math.symbolic.compile namespaces sequences words ;
 IN: math.symbolic.calculus
 
 DEFER: doit
@@ -618,6 +618,23 @@ PRIVATE>
             expr t t0 at-bound x from to definite-integrate s+
         ] [ expr x from to <definite-integral> ] if*
     ] if ;
+
+ERROR: undefined-at-point expr var point ;
+
+! The Taylor polynomial of expr about point, up to the term in
+! (x - point)^n: the sum of f(k)(point)*(x - point)^k/k!
+:: taylor ( expr x point n -- expr' )
+    V{ } clone :> terms
+    expr :> derivative!
+    n 1 + <iota> [| k |
+        derivative x point at-bound :> value
+        value defined? [ expr x point undefined-at-point ] unless
+        value x point s- k s^ s* k factorial s/ terms push
+        derivative x differentiate derivative!
+    ] each
+    terms >array >add ;
+
+: maclaurin ( expr x n -- expr' ) [ 0 ] dip taylor ;
 
 GENERIC: doit ( expr -- expr' )
 

@@ -243,3 +243,29 @@ PRIVATE>
     symbolic[ x neg exp ] x-sym symbolic[ inf neg ] symbolic[ inf ]
     definite-integrate expr>string
 ] unit-test
+
+! Taylor polynomials
+{ "x^3/6 + x^2/2 + x + 1" } [ symbolic[ x exp ] x-sym 3 maclaurin expr>string ] unit-test
+{ "x^5/120 - x^3/6 + x" } [ symbolic[ x sin ] x-sym 5 maclaurin expr>string ] unit-test
+{ "x^4/24 - x^2/2 + 1" } [ symbolic[ x cos ] x-sym 5 maclaurin expr>string ] unit-test
+{ "x^3 + x^2 + x + 1" } [ symbolic[ 1 x - -1 ^ ] x-sym 3 maclaurin expr>string ] unit-test
+{ "x^3/3 - x^2/2 + x" } [ symbolic[ 1 x + log ] x-sym 3 maclaurin expr>string ] unit-test
+! A polynomial is reproduced exactly
+{ "x^3 - 2*x^2 + 5" } [
+    symbolic[ x 3 ^ 2 x 2 ^ * - 5 + ] x-sym 4 maclaurin expr>string
+] unit-test
+! About a point other than 0
+{ t } [
+    symbolic[ x exp ] x-sym 1 4 taylor { { T{ sym f "x" } 1.3 } } subs evalf
+    1.3 e^ - absq 1e-6 <
+] unit-test
+! The coefficients at pi/6 involve sqrt(3), so the value is complex with a
+! negligible imaginary part
+{ t } [
+    symbolic[ x sin ] x-sym symbolic[ pi 6 / ] 3 taylor
+    { { T{ sym f "x" } 0.5 } } subs evalf 0.5 sin - absq 1e-12 <
+] unit-test
+{ t } [ symbolic[ x exp ] x-sym 0 4 taylor symbolic[ x exp ] x-sym 4 maclaurin = ] unit-test
+! log(x) has no Taylor series about 0: taylor throws undefined-at-point.
+! Not asserted here, because the compiler folds the call at compile time,
+! so the error is raised while the test is compiled rather than run.

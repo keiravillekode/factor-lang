@@ -35,6 +35,19 @@ HELP: jacobian
 { $values { "exprs" { $sequence "expressions" } } { "vars" { $sequence sym } } { "matrix" "a sequence of sequences" } }
 { $description "The Jacobian matrix: one row, the " { $link gradient } ", for each expression." } ;
 
+HELP: taylor
+{ $values { "expr" "an expression" } { "x" sym } { "point" "an expression" } { "n" integer } { "expr'" "an expression" } }
+{ $description "The Taylor polynomial of " { $snippet "expr" } " about " { $snippet "point" } ", up to the term in " { $snippet "(x - point)^n" } ": the sum of " { $snippet "f(k)(point)*(x - point)^k/k!" } " for k from 0 to n. The remainder is not represented." }
+{ $errors "Throws " { $link undefined-at-point } " when a derivative has no value at " { $snippet "point" } ", as for " { $snippet "log(x)" } " at 0." }
+{ $examples { $example "USING: math.symbolic math.symbolic.calculus ;" "symbolic[ x exp ] symbolic[ x ] 0 3 taylor expr." "x^3/6 + x^2/2 + x + 1" } } ;
+
+HELP: maclaurin
+{ $values { "expr" "an expression" } { "x" sym } { "n" integer } { "expr'" "an expression" } }
+{ $description "The " { $link taylor } " polynomial about 0." } ;
+
+HELP: undefined-at-point
+{ $error-description "Thrown by " { $link taylor } " when the expression or one of its derivatives has no value at the point." } ;
+
 HELP: limit
 { $values { "expr" "an expression" } { "x" sym } { "point" "an expression" } { "expr'" "an expression" } }
 { $description "The limit of " { $snippet "expr" } " as " { $snippet "x" } " approaches " { $snippet "point" } ", which may be " { $link infinity-expr } " or its negative. Uses substitution, the limits of " { $snippet "exp log atan tanh sinh cosh asinh acosh" } " at infinity, l'Hopital's rule for " { $snippet "0/0" } " and " { $snippet "infinity/infinity" } ", and rewrites " { $snippet "0*infinity" } " as a quotient. Outputs an unevaluated " { $link limit-expr } " when it finds no value." }
@@ -102,8 +115,8 @@ HELP: doit
 ARTICLE: "math.symbolic.calculus" "Symbolic calculus"
 "The " { $vocab-link "math.symbolic.calculus" } " vocabulary differentiates and integrates " { $vocab-link "math.symbolic" } " expressions."
 { $subsections differentiate gradient jacobian integrate definite-integrate nintegrate doit }
-"Limits:"
-{ $subsections limit }
+"Limits and series:"
+{ $subsections limit taylor maclaurin undefined-at-point }
 "Definite integrals by symmetry, and Feynman's trick:"
 { $subsections definite-by-symmetry feynman-derivative feynman-solve }
 "Integration by parts, one step at a time:"

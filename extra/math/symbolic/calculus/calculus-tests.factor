@@ -304,3 +304,17 @@ PRIVATE>
 { t } [
     symbolic[ x sin ] x-sym 0 1 symbolic[ x 2 ^ ] definite-by-substitution integral?
 ] unit-test
+
+! The gamma integral
+{ 2 } [ symbolic[ x 2 ^ x neg exp * ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ 1 } [ symbolic[ x x neg exp * ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ 1/4 } [ symbolic[ x 2 x * neg exp * ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ 6 } [ symbolic[ x 3 ^ x neg exp * ] x-sym 0 symbolic[ inf ] definite-integrate ] unit-test
+{ "sqrt(pi)/2" } [
+    symbolic[ x 1 2 / ^ x neg exp * ] x-sym 0 symbolic[ inf ]
+    definite-integrate expr>string
+] unit-test
+! The derivative of gamma is left unevaluated
+{ "D(gamma(x^2), x)" } [
+    symbolic[ x 2 ^ gamma ] x-sym differentiate expr>string
+] unit-test

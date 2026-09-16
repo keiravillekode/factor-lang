@@ -1,8 +1,8 @@
 ! Copyright (C) 2026 Eric Willigers.
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors arrays combinators compiler.units effects kernel
-make math math.constants math.functions math.symbolic sequences
-words ;
+make math math.analysis math.constants math.functions
+math.symbolic sequences words ;
 IN: math.symbolic.compile
 
 ERROR: not-compilable expr ;
@@ -50,6 +50,7 @@ M:: fn (compile) ( expr vars -- )
         { "asinh" [ \ asinh ] }
         { "acosh" [ \ acosh ] }
         { "atanh" [ \ atanh ] }
+        { "gamma" [ \ gamma ] }
     } case , ;
 
 PRIVATE>

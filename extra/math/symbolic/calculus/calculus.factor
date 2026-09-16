@@ -42,6 +42,7 @@ M:: pow differentiate ( expr var -- expr' )
     } cond ;
 
 M:: fn differentiate ( expr var -- expr' )
+    expr name>> "gamma" = [ expr var <derivative> ] [
     expr arg>> :> u
     u var differentiate
     u expr name>> {
@@ -59,7 +60,7 @@ M:: fn differentiate ( expr var -- expr' )
         { "asinh" [ 2 s^ 1 s+ ssqrt -1 s^ ] }
         { "acosh" [ 2 s^ 1 s- ssqrt -1 s^ ] }
         { "atanh" [ 2 s^ 1 swap s- -1 s^ ] }
-    } case s* ;
+    } case s* ] if ;
 
 M: derivative differentiate [ doit ] dip differentiate ;
 
@@ -342,6 +343,32 @@ CONSTANT: symmetry-sample-fractions { 1/8 1/4 3/8 1/2 5/8 3/4 7/8 }
         [ f f ]
     } cond ;
 
+! The integral of x^n*exp(-a*x) from 0 to infinity is
+! gamma(n + 1)/a^(n + 1), for a > 0 and n > -1.
+:: gamma-integral ( expr x from to -- v/f )
+    from 0 number= to +infinity? and [
+        expr factors>> [ "exp" fn-named? ] partition :> ( exponentials rest )
+        exponentials length 1 = [
+            exponentials first arg>> x linear-coefficients :> ( slope intercept )
+            slope number? [ slope 0 < intercept 0 number= and ] [ f ] if [
+                rest >mul :> power
+                {
+                    { [ power 1 number= ] [ 0 ] }
+                    { [ power x = ] [ 1 ] }
+                    { [ power pow? [ power base>> x = ] [ f ] if ] [
+                        power exponent>> dup number?
+                        [ dup -1 > [ ] [ drop f ] if ] [ drop f ] if
+                    ] }
+                    [ f ]
+                } cond :> exponent
+                exponent [
+                    exponent 1 + :> s
+                    s sgamma slope neg s s^ s/
+                ] [ f ] if
+            ] [ f ] if
+        ] [ f ] if
+    ] [ f ] if ;
+
 ! The integral of k*exp(-a*x^2 + b*x + c) over the whole line is
 ! k*sqrt(pi/a)*exp(b^2/(4*a) + c); over a half line it is half that,
 ! but only when b is 0, since otherwise it needs the error function.
@@ -387,7 +414,9 @@ PRIVATE>
         F x from bound-value
         2dup and [ s- ] [ 2drop expr x from to <definite-integral> ] if
     ] [
-        expr x from to gaussian-integral [ ] [
+        expr x from to gaussian-integral
+        [ ] [ expr mul? [ expr x from to gamma-integral ] [ f ] if ] if*
+        [ ] [
             expr x from to symmetry-constant-exact
             [ from to symmetry-value ]
             [ expr x from to <definite-integral> ] if*

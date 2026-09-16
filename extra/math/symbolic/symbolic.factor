@@ -2,9 +2,10 @@
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors arrays assocs combinators
 combinators.short-circuit generalizations io kernel lexer
-linked-assocs make math math.constants math.functions math.order
-math.parser prettyprint.backend prettyprint.custom sequences
-sorting strings vectors ;
+linked-assocs make math math.analysis math.combinatorics
+math.constants math.functions math.order math.parser
+prettyprint.backend prettyprint.custom sequences sorting strings
+vectors ;
 IN: math.symbolic
 
 ! Expressions are numbers or these tuples. Build them with the
@@ -544,6 +545,18 @@ PRIVATE>
         [ "atanh" u fn boa ]
     } cond ;
 
+:: sgamma ( u -- gamma[u] )
+    {
+        { [ u float? ] [ u gamma ] }
+        { [ u { [ integer? ] [ 0 > ] } 1&& ] [ u 1 - factorial ] }
+        ! half-integers, from gamma(1/2) = sqrt(pi) and gamma(z+1) = z*gamma(z)
+        { [ u { [ ratio? ] [ denominator 2 = ] [ 0 > ] } 1&& ] [
+            pi-expr ssqrt
+            u 1/2 - >integer <iota> [ 1/2 + ] map product s*
+        ] }
+        [ "gamma" u fn boa ]
+    } cond ;
+
 ERROR: unknown-function name ;
 
 : apply-fn ( arg name -- expr )
@@ -562,6 +575,7 @@ ERROR: unknown-function name ;
         { "asinh" [ sasinh ] }
         { "acosh" [ sacosh ] }
         { "atanh" [ satanh ] }
+        { "gamma" [ sgamma ] }
         [ unknown-function ]
     } case ;
 
@@ -705,6 +719,7 @@ CONSTANT: symbolic-words H{
     { "asinh" { 1 [ first sasinh ] } }
     { "acosh" { 1 [ first sacosh ] } }
     { "atanh" { 1 [ first satanh ] } }
+    { "gamma" { 1 [ first sgamma ] } }
     { "pi" { 0 [ drop pi-expr ] } }
     { "e" { 0 [ drop e-expr ] } }
     { "inf" { 0 [ drop infinity-expr ] } }

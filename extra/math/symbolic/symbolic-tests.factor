@@ -146,3 +146,15 @@ IN: math.symbolic.tests
 { "3*sqrt(pi)" } [ symbolic[ 9 pi * sqrt ] expr>string ] unit-test
 { "sqrt(2)" } [ symbolic[ 2 sqrt ] expr>string ] unit-test
 { "2*sqrt(x)" } [ symbolic[ 4 x * sqrt ] expr>string ] unit-test
+
+! The gamma function
+{ 24 } [ symbolic[ 5 gamma ] ] unit-test
+{ 1 } [ symbolic[ 1 gamma ] ] unit-test
+{ 720 } [ symbolic[ 7 gamma ] ] unit-test
+{ "sqrt(pi)" } [ symbolic[ 1 2 / gamma ] expr>string ] unit-test
+{ "sqrt(pi)/2" } [ symbolic[ 3 2 / gamma ] expr>string ] unit-test
+{ "3*sqrt(pi)/4" } [ symbolic[ 5 2 / gamma ] expr>string ] unit-test
+{ "gamma(x)" } [ symbolic[ x gamma ] expr>string ] unit-test
+{ "gamma(-1/2)" } [ symbolic[ 1 2 / neg gamma ] expr>string ] unit-test
+{ t } [ symbolic[ 5.5 gamma ] 52.34277778455352 1e-6 ~ ] unit-test
+{ t } [ symbolic[ 4 gamma ] evalf 6.0 1e-9 ~ ] unit-test

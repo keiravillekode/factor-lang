@@ -173,6 +173,11 @@ HELP: <limit>
 { $values { "expr" "an expression" } { "var" sym } { "point" "an expression" } { "limit-expr" limit-expr } }
 { $description "An unevaluated limit of " { $snippet "expr" } " as " { $snippet "var" } " approaches " { $snippet "point" } "." } ;
 
+HELP: sgamma
+{ $values { "u" "an expression" } { "gamma[u]" "an expression" } }
+{ $description "The gamma function: " { $snippet "gamma(n)" } " is " { $snippet "(n - 1)!" } " for a positive integer, " { $snippet "gamma(1/2)" } " is " { $snippet "sqrt(pi)" } ", and other positive half-integers follow from " { $snippet "gamma(z + 1) = z*gamma(z)" } ". A float argument is evaluated with " { $vocab-link "math.analysis" } ". Its derivative is left unevaluated, since the digamma function is not provided." }
+{ $examples { $example "USING: kernel math.symbolic ;" "symbolic[ 5 gamma ] symbolic[ 3 2 / gamma ] [ expr. ] bi@" "24\nsqrt(pi)/2" } } ;
+
 HELP: apply-fn
 { $values { "arg" "an expression" } { "name" string } { "expr" "an expression" } }
 { $description "Applies the function named " { $snippet "name" } " with simplification." } ;
@@ -248,7 +253,7 @@ $nl
 "Arithmetic and functions:"
 { $subsections s+ s- s* s/ s^ sneg ssqrt >add >mul }
 "Functions:"
-{ $subsections ssin scos stan sexp slog sasin sacos satan ssinh scosh stanh sasinh sacosh satanh apply-fn }
+{ $subsections ssin scos stan sexp slog sasin sacos satan ssinh scosh stanh sasinh sacosh satanh sgamma apply-fn }
 "Calculus expressions:"
 { $subsections <derivative> <integral> <definite-integral> <limit> }
 "Manipulation and evaluation:"

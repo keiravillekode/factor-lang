@@ -369,3 +369,210 @@ fn markEmbeddedCodePointers(gc: *GC, block: *code_blocks.CodeBlock, is_uninitial
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const fixture = @import("gc_test_fixture.zig");
+const testing = std.testing;
+
+test "full mark marks objects reachable from the data stack and skips garbage" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = f.tenuredArray(2, layouts.tagFixnum(1));
+    const b = f.tenuredArray(2, layouts.tagFixnum(2)); // garbage
+    const c = f.tenuredArray(2, layouts.tagFixnum(3));
+    const d = f.tenuredArray(2, layouts.tagFixnum(4)); // garbage
+
+    // a -> c, a rooted via the data stack; b and d unreachable.
+    fixture.arrayAt(a).data()[0] = c;
+    f.vm.push(a);
+
+    f.fullMark();
+
+    try testing.expect(f.isMarked(a));
+    try testing.expect(f.isMarked(c));
+    try testing.expect(!f.isMarked(b));
+    try testing.expect(!f.isMarked(d));
+    try testing.expectEqual(@as(usize, 0), f.gc.mark_stack.items.len);
+
+    // Marking must not disturb tenured objects.
+    try testing.expectEqual(c, fixture.arrayAt(a).data()[0]);
+    try testing.expectEqual(a, f.vm.peek());
+}
+
+test "full mark visits every root kind" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const via_retain = f.tenuredArray(1, layouts.false_object);
+    const via_special = f.tenuredArray(1, layouts.false_object);
+    const via_data_root = f.tenuredArray(1, layouts.false_object);
+    const via_context_object = f.tenuredArray(1, layouts.false_object);
+    const via_spare_ctx = f.tenuredArray(1, layouts.false_object);
+    const garbage = f.tenuredArray(1, layouts.false_object);
+
+    f.vm.vm_asm.ctx.pushRetain(via_retain);
+    f.vm.vm_asm.special_objects[3] = via_special;
+    var root_cell: Cell = via_data_root;
+    try f.vm.data_roots.append(f.vm.allocator, &root_cell);
+    defer _ = f.vm.data_roots.pop();
+    f.vm.vm_asm.ctx.context_objects[0] = via_context_object;
+    f.vm.vm_asm.spare_ctx.push(via_spare_ctx);
+
+    f.fullMark();
+
+    try testing.expect(f.isMarked(via_retain));
+    try testing.expect(f.isMarked(via_special));
+    try testing.expect(f.isMarked(via_data_root));
+    try testing.expect(f.isMarked(via_context_object));
+    try testing.expect(f.isMarked(via_spare_ctx));
+    try testing.expect(!f.isMarked(garbage));
+    // Tenured roots are not moved by marking.
+    try testing.expectEqual(via_data_root, root_cell);
+}
+
+test "full mark follows cycles and shared references without re-marking" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = f.tenuredArray(2, layouts.false_object);
+    const b = f.tenuredArray(2, layouts.false_object);
+    const shared = f.tenuredArray(1, layouts.tagFixnum(99));
+    const garbage = f.tenuredArray(1, layouts.false_object);
+
+    // a <-> b cycle, both point at shared.
+    fixture.arrayAt(a).data()[0] = b;
+    fixture.arrayAt(a).data()[1] = shared;
+    fixture.arrayAt(b).data()[0] = a;
+    fixture.arrayAt(b).data()[1] = shared;
+    f.vm.push(a);
+
+    f.fullMark();
+
+    try testing.expect(f.isMarked(a));
+    try testing.expect(f.isMarked(b));
+    try testing.expect(f.isMarked(shared));
+    try testing.expect(!f.isMarked(garbage));
+    // Mark bits are per 16-byte line: three 32-byte arrays.
+    const marked_lines = (2 * fixture.arraySize(2) + fixture.arraySize(1)) / layouts.data_alignment;
+    try testing.expectEqual(marked_lines, f.heap.tenured.marks.countMarked());
+    try testing.expectEqual(layouts.tagFixnum(99), fixture.arrayAt(shared).data()[0]);
+}
+
+test "full mark treats tuples through their layout and marks the layout too" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const layout = f.tenuredTupleLayout(3);
+    const referent = f.tenuredArray(1, layouts.false_object);
+    const tuple = f.tenuredTuple(layout, layouts.tagFixnum(0));
+    const garbage = f.tenuredArray(1, layouts.false_object);
+
+    const t: *layouts.Tuple = @ptrFromInt(layouts.UNTAG(tuple));
+    t.data()[2] = referent;
+    f.vm.push(tuple);
+
+    f.fullMark();
+
+    try testing.expect(f.isMarked(tuple));
+    try testing.expect(f.isMarked(layout));
+    try testing.expect(f.isMarked(referent));
+    try testing.expect(!f.isMarked(garbage));
+}
+
+test "full mark promotes nursery objects to tenured and rewrites the root" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const used_before = f.heap.tenured.usedBytes();
+    const t = f.tenuredArray(1, layouts.tagFixnum(5));
+    const garbage = f.tenuredArray(1, layouts.false_object);
+
+    // n (nursery) -> n2 (nursery) -> t (tenured); root is a data root.
+    const n2 = f.nurseryArray(1, t);
+    const n = f.nurseryArray(2, n2);
+    try testing.expect(f.inNursery(n));
+    try testing.expect(f.inNursery(n2));
+
+    var root: Cell = n;
+    try f.vm.data_roots.append(f.vm.allocator, &root);
+    defer _ = f.vm.data_roots.pop();
+
+    f.fullMark();
+
+    // Root now points into tenured, at a marked copy with intact contents.
+    try testing.expect(root != n);
+    try testing.expect(f.inTenured(root));
+    try testing.expect(f.isMarked(root));
+    try testing.expectEqual(layouts.TAG(n), layouts.TAG(root));
+    const new_n = fixture.arrayAt(root);
+    try testing.expectEqual(@as(Cell, 2), new_n.getCapacity());
+
+    // Its slot was rewritten to the promoted copy of n2, which itself points at t.
+    const new_n2 = new_n.data()[0];
+    try testing.expect(new_n2 != n2);
+    try testing.expect(f.inTenured(new_n2));
+    try testing.expect(f.isMarked(new_n2));
+    try testing.expectEqual(t, fixture.arrayAt(new_n2).data()[0]);
+    try testing.expectEqual(new_n2, new_n.data()[1]);
+    try testing.expect(f.isMarked(t));
+    try testing.expect(!f.isMarked(garbage));
+
+    // The nursery originals were turned into forwarding pointers.
+    try testing.expect(fixture.objectAt(n).isForwardingPointer());
+    try testing.expect(fixture.objectAt(n2).isForwardingPointer());
+    try testing.expectEqual(layouts.UNTAG(root), @intFromPtr(fixture.objectAt(n).forwardingPointer()));
+
+    // Promotion consumed tenured space for exactly the two copies.
+    const promoted = fixture.arraySize(2) + fixture.arraySize(1);
+    try testing.expectEqual(used_before + fixture.arraySize(1) * 2 + promoted, f.heap.tenured.usedBytes());
+}
+
+test "full mark promotes an object referenced twice only once" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n = f.nurseryArray(1, layouts.tagFixnum(7));
+    const holder = f.tenuredArray(2, n);
+    f.vm.push(holder);
+    f.vm.push(n);
+
+    f.fullMark();
+
+    const h = fixture.arrayAt(holder);
+    try testing.expect(f.inTenured(h.data()[0]));
+    try testing.expectEqual(h.data()[0], h.data()[1]);
+    try testing.expectEqual(h.data()[0], f.vm.peek());
+    try testing.expectEqual(layouts.tagFixnum(7), fixture.arrayAt(h.data()[0]).data()[0]);
+    // Only holder and one promoted copy are marked (lines of 16 bytes).
+    const marked_lines = (fixture.arraySize(2) + fixture.arraySize(1)) / layouts.data_alignment;
+    try testing.expectEqual(marked_lines, f.heap.tenured.marks.countMarked());
+}
+
+test "full mark ignores immediates and false in roots and slots" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = f.tenuredArray(3, layouts.tagFixnum(-1));
+    fixture.arrayAt(a).data()[1] = layouts.false_object;
+    f.vm.push(layouts.tagFixnum(123));
+    f.vm.push(layouts.false_object);
+    f.vm.push(a);
+
+    f.fullMark();
+
+    try testing.expect(f.isMarked(a));
+    try testing.expectEqual(fixture.arraySize(3) / layouts.data_alignment, f.heap.tenured.marks.countMarked());
+    try testing.expectEqual(layouts.tagFixnum(-1), fixture.arrayAt(a).data()[0]);
+    try testing.expectEqual(layouts.false_object, fixture.arrayAt(a).data()[1]);
+}

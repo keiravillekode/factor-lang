@@ -263,3 +263,145 @@ pub fn clearWriteBarrierRange(gc: *GC, start: Cell, end: Cell) void {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const fixture = @import("gc_test_fixture.zig");
+const testing = std.testing;
+
+test "sweep rebuilds the free list from mark bits and keeps live objects intact" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    const a = f.tenuredArray(2, layouts.tagFixnum(1));
+    const b = f.tenuredArray(6, layouts.tagFixnum(2)); // garbage, 64 bytes
+    const c = f.tenuredArray(130, layouts.tagFixnum(3)); // live, spans several cards
+    const d = f.tenuredArray(4, layouts.tagFixnum(4)); // garbage, 48 bytes
+    const e = f.tenuredArray(2, layouts.tagFixnum(5));
+
+    fixture.arrayAt(a).data()[0] = c;
+    fixture.arrayAt(c).data()[129] = e;
+    f.vm.push(a);
+
+    f.fullMark();
+    sweepPhase(&f.gc);
+
+    const live = fixture.arraySize(2) * 2 + fixture.arraySize(130);
+    try testing.expectEqual(tenured.size - live, tenured.freeBytes());
+    try testing.expectEqual(live, tenured.usedBytes());
+    // Holes at b and d plus the trailing block.
+    try testing.expectEqual(@as(Cell, 3), tenured.free_list.freeBlockCount());
+    try testing.expectEqual(tenured.size - live - fixture.arraySize(6) - fixture.arraySize(4), tenured.free_list.largestFreeBlock());
+
+    // Garbage became free blocks of the right size.
+    const b_free: *const free_list_mod.FreeBlock = @ptrFromInt(layouts.UNTAG(b));
+    const d_free: *const free_list_mod.FreeBlock = @ptrFromInt(layouts.UNTAG(d));
+    try testing.expect(b_free.isFree());
+    try testing.expect(d_free.isFree());
+    try testing.expectEqual(fixture.arraySize(6), b_free.size());
+    try testing.expectEqual(fixture.arraySize(4), d_free.size());
+
+    // Live objects were not touched.
+    try testing.expect(!fixture.objectAt(a).isFree());
+    try testing.expect(!fixture.objectAt(c).isFree());
+    try testing.expect(!fixture.objectAt(e).isFree());
+    try testing.expectEqual(c, fixture.arrayAt(a).data()[0]);
+    try testing.expectEqual(e, fixture.arrayAt(c).data()[129]);
+    try testing.expectEqual(layouts.tagFixnum(3), fixture.arrayAt(c).data()[64]);
+    try testing.expectEqual(@as(Cell, 130), fixture.arrayAt(c).getCapacity());
+
+    // The holes are reusable by subsequent tenured allocation.
+    const reuse_b = f.heap.allocateTenured(fixture.arraySize(6)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(layouts.UNTAG(b), reuse_b);
+    const reuse_d = f.heap.allocateTenured(fixture.arraySize(4)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(layouts.UNTAG(d), reuse_d);
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+}
+
+test "sweep coalesces adjacent garbage into one free block" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    const a = f.tenuredArray(1, layouts.false_object);
+    const g1 = f.tenuredArray(3, layouts.false_object);
+    _ = f.tenuredArray(9, layouts.false_object);
+    _ = f.tenuredArray(1, layouts.false_object);
+    const e = f.tenuredArray(1, layouts.false_object);
+    fixture.arrayAt(a).data()[0] = e;
+    f.vm.push(a);
+
+    f.fullMark();
+    sweepPhase(&f.gc);
+
+    const hole = fixture.arraySize(3) + fixture.arraySize(9) + fixture.arraySize(1);
+    try testing.expectEqual(@as(Cell, 2), tenured.free_list.freeBlockCount());
+    const hole_block: *const free_list_mod.FreeBlock = @ptrFromInt(layouts.UNTAG(g1));
+    try testing.expect(hole_block.isFree());
+    try testing.expectEqual(hole, hole_block.size());
+    try testing.expectEqual(layouts.UNTAG(g1) + hole, layouts.UNTAG(e));
+}
+
+test "sweep with no live objects frees the whole tenured space" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(1, layouts.false_object);
+    _ = f.tenuredArray(40, layouts.false_object);
+    _ = f.tenuredByteArray("garbage");
+
+    f.fullMark();
+    sweepPhase(&f.gc);
+
+    try testing.expectEqual(tenured.size, tenured.freeBytes());
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+    try testing.expectEqual(tenured.size, tenured.free_list.largestFreeBlock());
+    const reused = f.heap.allocateTenured(16) orelse return error.TestUnexpectedResult;
+    try testing.expect(tenured.contains(reused));
+}
+
+test "sweep keeps the object start map usable for a live multi-card object" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(1, layouts.false_object); // garbage at the start
+    const big = f.tenuredArray(200, layouts.false_object); // 1616 bytes, > 6 cards
+    const after = f.tenuredArray(1, layouts.false_object);
+    fixture.arrayAt(big).data()[0] = after;
+    f.vm.push(big);
+
+    f.fullMark();
+    sweepPhase(&f.gc);
+
+    // Walking back from a card in the middle of `big` must find `big`.
+    const osm = &tenured.object_start;
+    const mid_card = (layouts.UNTAG(big) - tenured.start) / vm_mod.card_size + 3;
+    const found = osm.findObjectContainingCard(mid_card) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(layouts.UNTAG(big), found);
+}
+
+test "sweep clears the tenured card table" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = f.tenuredArray(2, layouts.false_object);
+    const slot = &fixture.arrayAt(a).data()[0];
+    f.vm.push(a);
+    f.vm.writeBarrier(slot);
+    try testing.expect(f.cardByte(slot) != 0);
+
+    f.fullMark();
+    sweepPhase(&f.gc);
+
+    try testing.expectEqual(@as(u8, 0), f.cardByte(slot));
+}

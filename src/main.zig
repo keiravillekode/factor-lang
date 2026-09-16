@@ -17,6 +17,9 @@ const image = @import("image.zig");
 const inline_cache = @import("inline_cache.zig");
 const jit = @import("jit.zig");
 const layouts = @import("layouts.zig");
+const mark = @import("mark.zig");
+const compact = @import("compact.zig");
+const sweep = @import("sweep.zig");
 const mark_bits = @import("mark_bits.zig");
 const math = @import("fixnum.zig");
 const object_start_map = @import("object_start_map.zig");
@@ -568,12 +571,16 @@ test "vm struct layout" {
 // Reference all test modules
 test {
     _ = bignum;
+    _ = layouts;
     _ = mark_bits;
     _ = free_list;
     _ = object_start_map;
     _ = data_heap;
     _ = slot_visitor;
     _ = gc;
+    _ = mark;
+    _ = sweep;
+    _ = compact;
     _ = math;
     _ = primitives;
     _ = execution;

@@ -192,3 +192,77 @@ test "fixnum shifts" {
     try std.testing.expectEqual(@as(Fixnum, 2), shiftRight(8, 2));
     try std.testing.expectEqual(@as(Fixnum, -1), shiftRight(-1, 10)); // Sign extension
 }
+
+test "fixnum shiftLeft reports overflow exactly at the fixnum boundary" {
+    const fixnum_bits: Fixnum = @intCast(layouts.word_size - layouts.tag_bits);
+    // 1 << (fixnum_bits - 2) is fixnum_max/2 + 1, the largest power of two that fits.
+    try std.testing.expectEqual(FixnumResult{ .fixnum = fixnum_max / 2 + 1 }, shiftLeft(1, fixnum_bits - 2));
+    // -1 << (fixnum_bits - 1) equals fixnum_min and would fit, but the mask
+    // test is conservative for negatives (same as the C++ VM): it overflows.
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = -1, .b = fixnum_bits - 1 } }, shiftLeft(-1, fixnum_bits - 1));
+    try std.testing.expectEqual(FixnumResult{ .fixnum = 0 }, shiftLeft(0, 10));
+    // Amounts >= the fixnum width overflow regardless of the value (the
+    // primitive short-circuits a zero value before getting here).
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = 0, .b = 1000 } }, shiftLeft(0, 1000));
+    try std.testing.expectEqual(FixnumResult{ .fixnum = 5 }, shiftLeft(5, 0));
+    // One bit too many, and shifts past the fixnum width, overflow.
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = 1, .b = fixnum_bits - 1 } }, shiftLeft(1, fixnum_bits - 1));
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = 1, .b = fixnum_bits } }, shiftLeft(1, fixnum_bits));
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = 3, .b = fixnum_bits - 2 } }, shiftLeft(3, fixnum_bits - 2));
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = fixnum_max, .b = 1 } }, shiftLeft(fixnum_max, 1));
+    try std.testing.expectEqual(FixnumResult{ .overflow = .{ .a = fixnum_min, .b = 1 } }, shiftLeft(fixnum_min, 1));
+    // Negative amounts shift right arithmetically.
+    try std.testing.expectEqual(FixnumResult{ .fixnum = -4 }, shiftLeft(-7, -1));
+    try std.testing.expectEqual(FixnumResult{ .fixnum = 3 }, shiftLeft(7, -1));
+}
+
+test "fixnum shiftRight saturates at the word size" {
+    const word: Fixnum = @intCast(layouts.word_size);
+    try std.testing.expectEqual(@as(Fixnum, 0), shiftRight(fixnum_max, word));
+    try std.testing.expectEqual(@as(Fixnum, -1), shiftRight(fixnum_min, word));
+    try std.testing.expectEqual(@as(Fixnum, 0), shiftRight(1, 1000));
+    try std.testing.expectEqual(@as(Fixnum, -1), shiftRight(-1, 1000));
+    try std.testing.expectEqual(@as(Fixnum, 0), shiftRight(fixnum_max, word - 1));
+    try std.testing.expectEqual(@as(Fixnum, -1), shiftRight(fixnum_min, word - 1));
+    try std.testing.expectEqual(fixnum_min / 2, shiftRight(fixnum_min, 1));
+    try std.testing.expectEqual(@as(Fixnum, 42), shiftRight(42, 0));
+}
+
+test "fixnum div: MIN / -1 is reported as overflow" {
+    try std.testing.expectEqual(@as(?Fixnum, null), div(fixnum_min, -1));
+    try std.testing.expectEqual(@as(?Fixnum, fixnum_min), div(fixnum_min, 1));
+    try std.testing.expectEqual(@as(?Fixnum, -fixnum_max), div(fixnum_max, -1));
+    try std.testing.expectEqual(@as(?Fixnum, -3), div(-7, 2));
+    try std.testing.expectEqual(@as(?Fixnum, -3), div(7, -2));
+    try std.testing.expectEqual(@as(?Fixnum, 3), div(-7, -2));
+    try std.testing.expectEqual(@as(?Fixnum, null), div(0, 0));
+}
+
+test "floatToFixnum truncates, saturates and maps NaN to 0" {
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(-std.math.nan(f64)));
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(0.0));
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(-0.0));
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(0.999999));
+    try std.testing.expectEqual(@as(Fixnum, 0), floatToFixnum(-0.999999));
+    try std.testing.expectEqual(@as(Fixnum, 3), floatToFixnum(3.99));
+    try std.testing.expectEqual(@as(Fixnum, -3), floatToFixnum(-3.99));
+    try std.testing.expectEqual(@as(Fixnum, 1 << 53), floatToFixnum(9007199254740992.0));
+    try std.testing.expectEqual(fixnum_max, floatToFixnum(std.math.inf(f64)));
+    try std.testing.expectEqual(fixnum_min, floatToFixnum(-std.math.inf(f64)));
+    try std.testing.expectEqual(fixnum_max, floatToFixnum(1e300));
+    try std.testing.expectEqual(fixnum_min, floatToFixnum(-1e300));
+    try std.testing.expectEqual(fixnum_max, floatToFixnum(std.math.floatMax(f64)));
+    // Just inside the range: 2^58 is exactly representable and fits.
+    try std.testing.expectEqual(@as(Fixnum, 1) << 58, floatToFixnum(@as(f64, 1 << 58)));
+    try std.testing.expectEqual(-(@as(Fixnum, 1) << 58), floatToFixnum(-@as(f64, 1 << 58)));
+}
+
+test "fixnum_max and fixnum_min are the tagged word boundaries" {
+    const fixnum_bits: u6 = @intCast(layouts.word_size - layouts.tag_bits);
+    try std.testing.expectEqual((@as(Fixnum, 1) << (fixnum_bits - 1)) - 1, fixnum_max);
+    try std.testing.expectEqual(-(@as(Fixnum, 1) << (fixnum_bits - 1)), fixnum_min);
+    // Tagging the boundaries round-trips.
+    try std.testing.expectEqual(fixnum_max, layouts.untagFixnum(layouts.tagFixnum(fixnum_max)));
+    try std.testing.expectEqual(fixnum_min, layouts.untagFixnum(layouts.tagFixnum(fixnum_min)));
+}

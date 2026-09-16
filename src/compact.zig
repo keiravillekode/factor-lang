@@ -855,3 +855,344 @@ pub fn compactPhase(gc: *GC, compact_code_heap: bool) void {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const fixture = @import("gc_test_fixture.zig");
+const testing = std.testing;
+
+test "compaction slides live objects down and fixes slots, roots and the data stack" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    const a = f.tenuredArray(2, layouts.tagFixnum(10));
+    const b = f.tenuredArray(6, layouts.tagFixnum(20)); // garbage
+    const c = f.tenuredArray(3, layouts.tagFixnum(30));
+    const d = f.tenuredArray(4, layouts.tagFixnum(40)); // garbage
+    const e = f.tenuredArray(2, layouts.tagFixnum(50));
+
+    // e -> a -> c ; root is e (data root + data stack).
+    fixture.arrayAt(e).data()[0] = a;
+    fixture.arrayAt(a).data()[0] = c;
+    var root: Cell = e;
+    try f.vm.data_roots.append(f.vm.allocator, &root);
+    defer _ = f.vm.data_roots.pop();
+    f.vm.push(layouts.tagFixnum(1));
+    f.vm.push(e);
+
+    try testing.expectEqual(tenured.start, layouts.UNTAG(a));
+    f.gc.collectFull(true);
+
+    const size_a = fixture.arraySize(2);
+    const size_c = fixture.arraySize(3);
+    const size_e = fixture.arraySize(2);
+
+    // a stays put, c and e slide down over the holes.
+    const new_e = root;
+    try testing.expect(new_e != e);
+    try testing.expectEqual(layouts.TAG(e), layouts.TAG(new_e));
+    try testing.expectEqual(tenured.start + size_a + size_c, layouts.UNTAG(new_e));
+    const new_a = fixture.arrayAt(new_e).data()[0];
+    try testing.expectEqual(a, new_a);
+    const new_c = fixture.arrayAt(new_a).data()[0];
+    try testing.expectEqual(tenured.start + size_a, layouts.UNTAG(new_c));
+    try testing.expect(layouts.UNTAG(new_c) < layouts.UNTAG(c));
+
+    // Data stack was rewritten too, and untouched entries kept.
+    try testing.expectEqual(new_e, f.vm.pop());
+    try testing.expectEqual(layouts.tagFixnum(1), f.vm.pop());
+
+    // Payloads survived the move.
+    try testing.expectEqual(layouts.tagFixnum(10), fixture.arrayAt(new_a).data()[1]);
+    try testing.expectEqual(layouts.tagFixnum(30), fixture.arrayAt(new_c).data()[0]);
+    try testing.expectEqual(layouts.tagFixnum(30), fixture.arrayAt(new_c).data()[2]);
+    try testing.expectEqual(layouts.tagFixnum(50), fixture.arrayAt(new_e).data()[1]);
+    try testing.expectEqual(@as(Cell, 3), fixture.arrayAt(new_c).getCapacity());
+
+    // Free list is a single trailing block covering everything after e.
+    const live = size_a + size_c + size_e;
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+    try testing.expectEqual(tenured.size - live, tenured.freeBytes());
+    try testing.expectEqual(tenured.size - live, tenured.free_list.largestFreeBlock());
+    const next = f.heap.allocateTenured(16) orelse return error.TestUnexpectedResult;
+    try testing.expect(next >= tenured.start + live and next < tenured.end);
+
+    try testing.expectEqual(@as(Cell, 1), f.heap.full_collections);
+    _ = b;
+    _ = d;
+}
+
+test "compaction resolves tuple sizes through a moved layout and fixes the layout slot" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(5, layouts.false_object); // garbage, forces the layout to move
+    const layout = f.tenuredTupleLayout(3);
+    const tuple = f.tenuredTuple(layout, layouts.false_object);
+    _ = f.tenuredArray(2, layouts.false_object); // garbage between tuple and x
+    const x = f.tenuredArray(1, layouts.tagFixnum(77));
+
+    const t: *layouts.Tuple = @ptrFromInt(layouts.UNTAG(tuple));
+    t.data()[0] = layouts.tagFixnum(7);
+    t.data()[1] = x;
+    f.vm.push(tuple);
+
+    f.gc.collectFull(true);
+
+    const new_tuple = f.vm.peek();
+    try testing.expectEqual(layouts.TAG(tuple), layouts.TAG(new_tuple));
+    try testing.expectEqual(tenured.start + fixture.tuple_layout_size, layouts.UNTAG(new_tuple));
+
+    const nt: *layouts.Tuple = @ptrFromInt(layouts.UNTAG(new_tuple));
+    // Layout slot points at the relocated layout, which now sits at the start.
+    try testing.expectEqual(tenured.start | fixture.array_tag, nt.layout);
+    const nl: *layouts.TupleLayout = @ptrFromInt(layouts.UNTAG(nt.layout));
+    try testing.expectEqual(layouts.tagFixnum(3), nl.size);
+    try testing.expectEqual(layouts.tagFixnum(@intCast(fixture.tuple_layout_capacity)), nl.capacity);
+
+    // All three slots were carried along and fixed up.
+    try testing.expectEqual(layouts.tagFixnum(7), nt.data()[0]);
+    const new_x = nt.data()[1];
+    try testing.expectEqual(tenured.start + fixture.tuple_layout_size + fixture.tupleSize(3), layouts.UNTAG(new_x));
+    try testing.expectEqual(layouts.tagFixnum(77), fixture.arrayAt(new_x).data()[0]);
+    try testing.expectEqual(layouts.false_object, nt.data()[2]);
+
+    const live = fixture.tuple_layout_size + fixture.tupleSize(3) + fixture.arraySize(1);
+    try testing.expectEqual(tenured.size - live, tenured.freeBytes());
+}
+
+test "compaction moves pointer-free objects and preserves their bytes" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(9, layouts.false_object); // garbage hole
+
+    var pattern: [300]u8 = undefined;
+    for (&pattern, 0..) |*p, i| p.* = @truncate(i * 7 + 3);
+    const ba = f.tenuredByteArray(&pattern);
+    _ = f.tenuredArray(1, layouts.false_object); // garbage hole
+    const text = "hello, compaction";
+    const str = f.tenuredString(text);
+    const holder = f.tenuredArray(2, layouts.false_object);
+    fixture.arrayAt(holder).data()[0] = ba;
+    fixture.arrayAt(holder).data()[1] = str;
+    f.vm.push(holder);
+
+    f.gc.collectFull(true);
+
+    const h = fixture.arrayAt(f.vm.peek());
+    const new_ba = h.data()[0];
+    const new_str = h.data()[1];
+    try testing.expect(new_ba != ba);
+    try testing.expect(new_str != str);
+    try testing.expectEqual(tenured.start, layouts.UNTAG(new_ba));
+    try testing.expectEqual(tenured.start + fixture.byteArraySize(pattern.len), layouts.UNTAG(new_str));
+
+    const nba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(new_ba));
+    try testing.expectEqual(layouts.tagFixnum(pattern.len), nba.capacity);
+    try testing.expectEqualSlices(u8, &pattern, nba.data()[0..pattern.len]);
+
+    const ns: *layouts.String = @ptrFromInt(layouts.UNTAG(new_str));
+    try testing.expectEqual(layouts.tagFixnum(text.len), ns.length);
+    try testing.expectEqual(layouts.false_object, ns.aux);
+    try testing.expectEqual(layouts.tagFixnum(0), ns.hashcode_field);
+    try testing.expectEqualSlices(u8, text, ns.data()[0..text.len]);
+}
+
+test "compaction fixes every slot of an object spanning several cards" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(1, layouts.false_object); // garbage hole
+    const cap: Cell = 200; // 1616 bytes: covers > 6 cards of 256 bytes
+    const big = f.tenuredArray(cap, layouts.false_object);
+    var targets: [8]Cell = undefined;
+    for (&targets, 0..) |*t, i| {
+        _ = f.tenuredArray(1, layouts.false_object); // garbage before each target
+        t.* = f.tenuredArray(1, layouts.tagFixnum(@intCast(i)));
+    }
+    // Spread references across the big array, one per card-ish stride.
+    for (targets, 0..) |t, i| fixture.arrayAt(big).data()[i * 27] = t;
+    fixture.arrayAt(big).data()[cap - 1] = big; // self reference
+    f.vm.push(big);
+
+    f.gc.collectFull(true);
+
+    const new_big = f.vm.peek();
+    try testing.expectEqual(tenured.start, layouts.UNTAG(new_big));
+    const nb = fixture.arrayAt(new_big);
+    try testing.expectEqual(cap, nb.getCapacity());
+    var expected_addr = tenured.start + fixture.arraySize(cap);
+    for (0..targets.len) |i| {
+        const slot = nb.data()[i * 27];
+        try testing.expectEqual(expected_addr | fixture.array_tag, slot);
+        try testing.expectEqual(layouts.tagFixnum(@intCast(i)), fixture.arrayAt(slot).data()[0]);
+        expected_addr += fixture.arraySize(1);
+    }
+    try testing.expectEqual(new_big, nb.data()[cap - 1]);
+    // Untouched cells are still f.
+    try testing.expectEqual(layouts.false_object, nb.data()[1]);
+    try testing.expectEqual(layouts.false_object, nb.data()[cap - 2]);
+    try testing.expectEqual(tenured.size - (fixture.arraySize(cap) + targets.len * fixture.arraySize(1)), tenured.freeBytes());
+}
+
+test "full compacting collection promotes nursery objects and then compacts them" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(3, layouts.false_object); // garbage hole at the start
+    const t = f.tenuredArray(1, layouts.tagFixnum(5));
+    const n = f.nurseryArray(1, t);
+    const nursery_start = f.heap.nursery.start;
+    try testing.expect(f.inNursery(n));
+    f.vm.push(n);
+
+    f.gc.collectFull(true);
+
+    const new_n = f.vm.peek();
+    try testing.expect(f.inTenured(new_n));
+    // t was first in tenured after the hole, so it slides to the start; the
+    // promoted copy of n lands right behind it.
+    try testing.expectEqual(tenured.start | fixture.array_tag, fixture.arrayAt(new_n).data()[0]);
+    try testing.expectEqual(tenured.start + fixture.arraySize(1), layouts.UNTAG(new_n));
+    try testing.expectEqual(layouts.tagFixnum(5), fixture.arrayAt(fixture.arrayAt(new_n).data()[0]).data()[0]);
+
+    // The nursery original became a forwarding pointer and the nursery was reset.
+    try testing.expect(fixture.objectAt(n).isForwardingPointer());
+    try testing.expectEqual(nursery_start, f.vm.vm_asm.nursery.here);
+    try testing.expectEqual(nursery_start, f.heap.nursery.here);
+    try testing.expectEqual(tenured.size - 2 * fixture.arraySize(1), tenured.freeBytes());
+}
+
+test "compaction with nothing live empties tenured space" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(1, layouts.false_object);
+    _ = f.tenuredByteArray("bytes");
+    _ = f.tenuredArray(300, layouts.false_object);
+
+    f.gc.collectFull(true);
+
+    try testing.expectEqual(tenured.size, tenured.freeBytes());
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+    try testing.expectEqual(tenured.size, tenured.free_list.largestFreeBlock());
+    const reused = f.heap.allocateTenured(32) orelse return error.TestUnexpectedResult;
+    try testing.expect(tenured.contains(reused));
+}
+
+test "compaction with no holes leaves objects in place" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    const a = f.tenuredArray(2, layouts.false_object);
+    const b = f.tenuredArray(4, layouts.tagFixnum(4));
+    fixture.arrayAt(a).data()[0] = b;
+    fixture.arrayAt(a).data()[1] = a;
+    f.vm.push(a);
+
+    f.gc.collectFull(true);
+
+    try testing.expectEqual(a, f.vm.peek());
+    try testing.expectEqual(b, fixture.arrayAt(a).data()[0]);
+    try testing.expectEqual(a, fixture.arrayAt(a).data()[1]);
+    try testing.expectEqual(layouts.tagFixnum(4), fixture.arrayAt(b).data()[3]);
+    try testing.expectEqual(tenured.size - fixture.arraySize(2) - fixture.arraySize(4), tenured.freeBytes());
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+}
+
+test "compaction fixes special objects, retain stack and context objects" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    _ = f.tenuredArray(7, layouts.false_object); // garbage hole
+    const via_special = f.tenuredArray(1, layouts.tagFixnum(1));
+    const via_retain = f.tenuredArray(1, layouts.tagFixnum(2));
+    const via_context_object = f.tenuredArray(1, layouts.tagFixnum(3));
+    const via_spare = f.tenuredArray(1, layouts.tagFixnum(4));
+
+    f.vm.vm_asm.special_objects[2] = via_special;
+    f.vm.vm_asm.ctx.pushRetain(via_retain);
+    f.vm.vm_asm.ctx.context_objects[1] = via_context_object;
+    f.vm.vm_asm.spare_ctx.push(via_spare);
+
+    f.gc.collectFull(true);
+
+    const s = fixture.arraySize(1);
+    const new_special = f.vm.vm_asm.special_objects[2];
+    const new_retain = f.vm.vm_asm.ctx.peekRetain();
+    const new_context_object = f.vm.vm_asm.ctx.context_objects[1];
+    const new_spare = f.vm.vm_asm.spare_ctx.peek();
+
+    try testing.expectEqual(tenured.start, layouts.UNTAG(new_special));
+    try testing.expectEqual(tenured.start + s, layouts.UNTAG(new_retain));
+    try testing.expectEqual(tenured.start + 2 * s, layouts.UNTAG(new_context_object));
+    try testing.expectEqual(tenured.start + 3 * s, layouts.UNTAG(new_spare));
+    try testing.expectEqual(layouts.tagFixnum(1), fixture.arrayAt(new_special).data()[0]);
+    try testing.expectEqual(layouts.tagFixnum(2), fixture.arrayAt(new_retain).data()[0]);
+    try testing.expectEqual(layouts.tagFixnum(3), fixture.arrayAt(new_context_object).data()[0]);
+    try testing.expectEqual(layouts.tagFixnum(4), fixture.arrayAt(new_spare).data()[0]);
+}
+
+test "compaction clears the tenured card table" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    _ = f.tenuredArray(1, layouts.false_object); // garbage hole
+    const a = f.tenuredArray(2, layouts.false_object);
+    const slot = &fixture.arrayAt(a).data()[0];
+    f.vm.push(a);
+    f.vm.writeBarrier(slot);
+    try testing.expect(f.cardByte(slot) != 0);
+
+    f.gc.collectFull(true);
+
+    const new_slot = &fixture.arrayAt(f.vm.peek()).data()[0];
+    try testing.expectEqual(@as(u8, 0), f.cardByte(slot));
+    try testing.expectEqual(@as(u8, 0), f.cardByte(new_slot));
+}
+
+test "compactPhase forwards data through the mark bits without moving unmarked space" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const tenured = f.tenured();
+    const g = f.tenuredArray(2, layouts.false_object); // garbage
+    const a = f.tenuredArray(2, layouts.tagFixnum(9));
+    f.vm.push(a);
+
+    // Drive the phases by hand instead of through collectFull.
+    f.fullMark();
+    sweep_mod.sweepPhase(&f.gc);
+    try testing.expectEqual(@as(Cell, 2), tenured.free_list.freeBlockCount());
+
+    compactPhase(&f.gc, true);
+
+    try testing.expectEqual(layouts.UNTAG(g) | fixture.array_tag, f.vm.peek());
+    try testing.expectEqual(layouts.tagFixnum(9), fixture.arrayAt(f.vm.peek()).data()[1]);
+    try testing.expectEqual(@as(Cell, 1), tenured.free_list.freeBlockCount());
+    try testing.expectEqual(tenured.size - fixture.arraySize(2), tenured.freeBytes());
+    // The mark bit for the old location is stale but the OSM knows the new one.
+    const card0 = (layouts.UNTAG(g) - tenured.start) / vm_mod.card_size;
+    try testing.expectEqual(tenured.start, tenured.object_start.findObjectContainingCard(card0 + 1) orelse 0);
+}

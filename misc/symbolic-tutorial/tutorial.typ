@@ -550,6 +550,28 @@ symbolic[ x atan ] symbolic[ x ] symbolic[ inf ] limit expr.
 ! => pi/2
 ```
 
+== One to the infinity
+
+$ lim_(x -> 0) (1 + x)^(1\/x) = e, quad lim_(x -> 0) (1 + sin 5x)^(7\/x) = e^35 $
+
+Writing $f^g$ as $exp(g log f)$ turns this into a product the engine can
+already do.
+
+```factor
+symbolic[ 1 x + 1 x / ^ ] symbolic[ x ] 0 limit expr.
+! => e
+symbolic[ 1 5 x * sin + 7 x / ^ ] symbolic[ x ] 0 limit expr.
+! => exp(35)
+```
+
+An exponent that tends to 0 is not indeterminate, and needs no such
+treatment.
+
+```factor
+symbolic[ 1 5 x * sin + x 7 / ^ ] symbolic[ x ] 0 limit .
+! => 1
+```
+
 == No limit
 
 $ lim_(x -> infinity) sin x "does not exist" $

@@ -349,3 +349,11 @@ PRIVATE>
     symbolic[ x 3 ^ 3 x * y * - y 3 ^ + ] { T{ sym f "x" } T{ sym f "y" } } hessian
     det2 { { T{ sym f "x" } 0 } { T{ sym f "y" } 0 } } subs
 ] unit-test
+
+! The 1^infinity form, through exp of the limit of exponent*log(base)
+{ "e" } [ symbolic[ 1 x + 1 x / ^ ] x-sym 0 limit expr>string ] unit-test
+{ "exp(5)" } [ symbolic[ 1 5 x * + 1 x / ^ ] x-sym 0 limit expr>string ] unit-test
+{ "exp(35)" } [ symbolic[ 1 5 x * sin + 7 x / ^ ] x-sym 0 limit expr>string ] unit-test
+{ "e" } [ symbolic[ 1 1 x / + x ^ ] x-sym symbolic[ inf ] limit expr>string ] unit-test
+! Not indeterminate: the exponent tends to 0
+{ 1 } [ symbolic[ 1 5 x * sin + x 7 / ^ ] x-sym 0 limit ] unit-test

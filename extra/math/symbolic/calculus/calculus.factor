@@ -597,18 +597,24 @@ DEFER: (limit)
 :: pow-limit ( expr x point steps -- v/f )
     expr base>> x point steps (limit) :> b
     expr exponent>> x point steps (limit) :> n
-    b n and [
-        {
-            { [ b infinite? n number? and ] [
-                n 0 > [
-                    b infinite-sign -1 = n integer? and n odd? and
-                    [ infinity-expr sneg ] [ infinity-expr ] if
-                ] [ n 0 < [ 0 ] [ f ] if ] if
-            ] }
-            { [ b infinite? n infinite? or ] [ f ] }
-            [ b n s^ dup defined? [ ] [ drop f ] if ]
-        } cond
-    ] [ f ] if ;
+    {
+        ! 1^infinity: the limit is exp of the limit of exponent*log(base).
+        ! The exponent limit can be unknown rather than infinite, as it is
+        ! for (1+x)^(1/x) at zero, where 1/x has no two-sided limit.
+        { [ b 1 number= n [ infinite? ] [ t ] if* and ] [
+            expr exponent>> expr base>> slog s* x point steps (limit)
+            [ sexp ] [ f ] if*
+        ] }
+        { [ b n and not ] [ f ] }
+        { [ b infinite? n number? and ] [
+            n 0 > [
+                b infinite-sign -1 = n integer? and n odd? and
+                [ infinity-expr sneg ] [ infinity-expr ] if
+            ] [ n 0 < [ 0 ] [ f ] if ] if
+        ] }
+        { [ b infinite? n infinite? or ] [ f ] }
+        [ b n s^ dup defined? [ ] [ drop f ] if ]
+    } cond ;
 
 :: (limit) ( expr x point steps -- v/f )
     {

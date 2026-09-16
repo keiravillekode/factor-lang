@@ -50,7 +50,7 @@ HELP: undefined-at-point
 
 HELP: limit
 { $values { "expr" "an expression" } { "x" sym } { "point" "an expression" } { "expr'" "an expression" } }
-{ $description "The limit of " { $snippet "expr" } " as " { $snippet "x" } " approaches " { $snippet "point" } ", which may be " { $link infinity-expr } " or its negative. Uses substitution, the limits of " { $snippet "exp log atan tanh sinh cosh asinh acosh" } " at infinity, l'Hopital's rule for " { $snippet "0/0" } " and " { $snippet "infinity/infinity" } ", and rewrites " { $snippet "0*infinity" } " as a quotient. Outputs an unevaluated " { $link limit-expr } " when it finds no value." }
+{ $description "The limit of " { $snippet "expr" } " as " { $snippet "x" } " approaches " { $snippet "point" } ", which may be " { $link infinity-expr } " or its negative. Uses substitution, the limits of " { $snippet "exp log atan tanh sinh cosh asinh acosh" } " at infinity, l'Hopital's rule for " { $snippet "0/0" } " and " { $snippet "infinity/infinity" } ", rewrites " { $snippet "0*infinity" } " as a quotient, and evaluates " { $snippet "1^infinity" } " as " { $snippet "exp" } " of the limit of " { $snippet "exponent*log(base)" } ". Outputs an unevaluated " { $link limit-expr } " when it finds no value." }
 { $notes "One-sided limits are not distinguished; " { $snippet "log(x)" } " at 0 is taken from the right." }
 { $examples
     { $example "USING: math.symbolic math.symbolic.calculus prettyprint ;" "symbolic[ x x log * ] symbolic[ x ] 0 limit ." "0" }

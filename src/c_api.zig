@@ -640,3 +640,205 @@ fn findDlsymRelocation(block: *code_blocks.CodeBlock, return_address: Cell) Dlsy
 }
 
 // Tests
+
+const testing = std.testing;
+
+const CApiTestVM = struct {
+    vm: *FactorVM,
+    heap: *@import("data_heap.zig").DataHeap,
+
+    fn init() !CApiTestVM {
+        const data_heap_mod = @import("data_heap.zig");
+        const allocator = testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        // vm.gc stays null, so the nursery must hold every allocation of a test.
+        const heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        return .{ .vm = vm, .heap = heap };
+    }
+
+    fn deinit(self: *CApiTestVM) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fields(self: *CApiTestVM) *VMAssemblyFields {
+        return &self.vm.vm_asm;
+    }
+};
+
+fn expectBignumInt64(cell: Cell, expected: i64) !void {
+    try testing.expect(layouts.hasTag(cell, .bignum));
+    const bn: *const bignum.Bignum = @ptrFromInt(layouts.UNTAG(cell));
+    try testing.expectEqual(expected, bignum.toInt64(bn));
+}
+
+fn expectBignumCell(cell: Cell, expected: Cell) !void {
+    try testing.expect(layouts.hasTag(cell, .bignum));
+    const bn: *const bignum.Bignum = @ptrFromInt(layouts.UNTAG(cell));
+    try testing.expect(!bn.isNegative());
+    try testing.expectEqual(expected, bignum.toCell(bn));
+}
+
+test "from_signed_cell/8/4 return fixnums inside the fixnum range and bignums outside" {
+    var t = try CApiTestVM.init();
+    defer t.deinit();
+
+    for ([_]i64{ 0, 1, -1, 12345, -12345, fixnum_max, fixnum_min }) |n| {
+        try testing.expectEqual(layouts.tagFixnum(n), from_signed_cell(n, t.fields()));
+        try testing.expectEqual(layouts.tagFixnum(n), from_signed_8(n, t.fields()));
+    }
+    // One past either end of the fixnum range no longer fits.
+    // minInt(i64) itself is covered (and currently skipped) in fixnum.zig.
+    for ([_]i64{ fixnum_max + 1, fixnum_min - 1, std.math.maxInt(i64), std.math.minInt(i64) + 1 }) |n| {
+        try expectBignumInt64(from_signed_cell(n, t.fields()), n);
+        try expectBignumInt64(from_signed_8(n, t.fields()), n);
+    }
+    // Every 32-bit value is a fixnum.
+    for ([_]i32{ 0, -1, std.math.maxInt(i32), std.math.minInt(i32) }) |n| {
+        try testing.expectEqual(layouts.tagFixnum(n), from_signed_4(n, t.fields()));
+    }
+}
+
+test "from_unsigned_cell/8/4 handle the fixnum limit, the sign bit and u64 max" {
+    var t = try CApiTestVM.init();
+    defer t.deinit();
+
+    const max_fixnum_cell: Cell = @intCast(fixnum_max);
+    for ([_]Cell{ 0, 1, 12345, max_fixnum_cell }) |n| {
+        try testing.expectEqual(layouts.tagFixnum(@intCast(n)), from_unsigned_cell(n, t.fields()));
+        try testing.expectEqual(layouts.tagFixnum(@intCast(n)), from_unsigned_8(n, t.fields()));
+    }
+    // Above the fixnum limit but below the sign bit: single toBignum path.
+    for ([_]Cell{ max_fixnum_cell + 1, @as(Cell, 1) << 62, std.math.maxInt(i64) }) |n| {
+        try expectBignumCell(from_unsigned_cell(n, t.fields()), n);
+        try expectBignumCell(from_unsigned_8(n, t.fields()), n);
+    }
+    // With the sign bit set the value must not be read as negative.
+    for ([_]Cell{ @as(Cell, 1) << 63, (@as(Cell, 1) << 63) + 1, std.math.maxInt(u64), 0xFFFF_FFFF_FFFF_FFF0 }) |n| {
+        const cell = from_unsigned_cell(n, t.fields());
+        try expectBignumCell(cell, n);
+        const bn: *const bignum.Bignum = @ptrFromInt(layouts.UNTAG(cell));
+        try testing.expectEqual(@as(Cell, 2), bn.length());
+        try expectBignumCell(from_unsigned_8(n, t.fields()), n);
+    }
+    for ([_]u32{ 0, 1, std.math.maxInt(u32) }) |n| {
+        try testing.expectEqual(layouts.tagFixnum(n), from_unsigned_4(n, t.fields()));
+    }
+}
+
+test "err_no/set_err_no and factor_memcpy" {
+    const saved = err_no();
+    defer set_err_no(saved);
+
+    set_err_no(0);
+    try testing.expectEqual(@as(c_int, 0), err_no());
+    set_err_no(5); // EIO
+    try testing.expectEqual(@as(c_int, 5), err_no());
+
+    var src = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var dst = [_]u8{0} ** 8;
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&dst)), factor_memcpy(&dst, &src, 5));
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 0, 0, 0 }, &dst);
+
+    // A null source or destination copies nothing and returns the destination.
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&dst)), factor_memcpy(&dst, null, 8));
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 0, 0, 0 }, &dst);
+    try testing.expectEqual(@as(?*anyopaque, null), factor_memcpy(null, &src, 8));
+}
+
+test "new_context and reset_context initialize the context alien" {
+    var t = try CApiTestVM.init();
+    defer t.deinit();
+    const allocator = testing.allocator;
+
+    // new_context hands back a fresh active context whose context object 2
+    // is a pinned alien pointing at the context itself.
+    const ctx = new_context(t.fields()) orelse return error.OutOfMemory;
+    defer {
+        // Not owned by ctx/spare_ctx/unused_contexts, so release it by hand.
+        ctx.deinit(allocator);
+        allocator.destroy(ctx);
+    }
+    try testing.expect(ctx.isActive());
+    try testing.expect(ctx != t.vm.vm_asm.ctx);
+    const ctx_alien_cell = ctx.context_objects[2];
+    try testing.expect(layouts.hasTag(ctx_alien_cell, .alien));
+    const ctx_alien: *const layouts.Alien = @ptrFromInt(layouts.UNTAG(ctx_alien_cell));
+    try testing.expectEqual(layouts.false_object, ctx_alien.base);
+    try testing.expectEqual(@intFromPtr(ctx), ctx_alien.address);
+    try testing.expectEqual(@as(?*Context, ctx), t.vm.getContextFromAlien(ctx_alien_cell));
+
+    // reset_context keeps the two top cells and drops everything below them.
+    const current = t.vm.vm_asm.ctx;
+    const stack_base = current.datastack;
+    t.vm.push(layouts.tagFixnum(1));
+    t.vm.push(layouts.tagFixnum(2));
+    t.vm.push(layouts.tagFixnum(3));
+    current.pushRetain(layouts.tagFixnum(9));
+    current.context_objects[2] = layouts.false_object;
+    reset_context(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(3), t.vm.pop());
+    try testing.expectEqual(layouts.tagFixnum(2), t.vm.pop());
+    try testing.expectEqual(stack_base, current.datastack);
+    try testing.expect(layouts.hasTag(current.context_objects[2], .alien));
+    const cur_alien: *const layouts.Alien = @ptrFromInt(layouts.UNTAG(current.context_objects[2]));
+    try testing.expectEqual(@intFromPtr(current), cur_alien.address);
+}
+
+test "begin_callback and end_callback track callback ids and contexts" {
+    var t = try CApiTestVM.init();
+    defer t.deinit();
+    const allocator = testing.allocator;
+
+    const ctx = t.vm.vm_asm.ctx;
+    const old_spare = t.vm.vm_asm.spare_ctx;
+    t.vm.push(layouts.tagFixnum(42));
+    const stack_base = ctx.datastack - @sizeOf(Cell);
+
+    // begin_callback resets the current context, provisions a new spare and
+    // returns the (rooted) quotation unchanged.
+    const quot = layouts.tagFixnum(7);
+    try testing.expectEqual(quot, begin_callback(t.fields(), quot));
+    try testing.expectEqual(stack_base, ctx.datastack);
+    try testing.expectEqual(@as(usize, 1), t.vm.callback_ids.items.len);
+    try testing.expectEqual(@as(@TypeOf(t.vm.callback_ids.items[0]), 0), t.vm.callback_ids.items[0]);
+    try testing.expectEqual(@as(@TypeOf(t.vm.callback_id), 1), t.vm.callback_id);
+    try testing.expect(t.vm.vm_asm.spare_ctx != old_spare);
+    try testing.expect(t.vm.vm_asm.spare_ctx.isActive());
+    try testing.expect(layouts.hasTag(ctx.context_objects[2], .alien));
+    const first_spare = t.vm.vm_asm.spare_ctx;
+
+    // A nested callback gets the next id and yet another spare.
+    _ = begin_callback(t.fields(), quot);
+    try testing.expectEqual(@as(usize, 2), t.vm.callback_ids.items.len);
+    try testing.expectEqual(@as(@TypeOf(t.vm.callback_ids.items[1]), 1), t.vm.callback_ids.items[1]);
+    try testing.expect(t.vm.vm_asm.spare_ctx != first_spare);
+
+    // end_callback pops the id and parks the current context for reuse; the
+    // machine-code stub normally swaps ctx back, so do that by hand here.
+    end_callback(t.fields());
+    try testing.expectEqual(@as(usize, 1), t.vm.callback_ids.items.len);
+    try testing.expectEqual(@as(usize, 1), t.vm.unused_contexts.items.len);
+    try testing.expectEqual(ctx, t.vm.unused_contexts.items[0]);
+    try testing.expect(!ctx.isActive());
+    t.vm.vm_asm.ctx = try t.vm.newContext();
+    try testing.expectEqual(ctx, t.vm.vm_asm.ctx);
+    try testing.expectEqual(@as(usize, 0), t.vm.unused_contexts.items.len);
+
+    end_callback(t.fields());
+    try testing.expectEqual(@as(usize, 0), t.vm.callback_ids.items.len);
+    t.vm.vm_asm.ctx = try t.vm.newContext();
+    try testing.expectEqual(ctx, t.vm.vm_asm.ctx);
+
+    // The spares that begin_callback replaced are no longer referenced by the
+    // VM; release them so the testing allocator sees no leak.
+    for ([_]*Context{ old_spare, first_spare }) |orphan| {
+        orphan.deinit(allocator);
+        allocator.destroy(orphan);
+    }
+}

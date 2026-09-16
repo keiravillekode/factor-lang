@@ -153,3 +153,126 @@ pub fn isSaveSpecial(i: Cell) bool {
 }
 
 pub const context_object_count: Cell = 4;
+
+// --- Tests ---
+
+test "SpecialObject indices match vm/objects.hpp" {
+    const expected = [_]struct { SpecialObject, Cell }{
+        .{ .walker_hook, 3 },
+        .{ .callcc_1, 4 },
+        .{ .error_handler_quot, 5 },
+        .{ .cell_size, 7 },
+        .{ .cpu, 8 },
+        .{ .os, 9 },
+        .{ .args, 10 },
+        .{ .stdin, 11 },
+        .{ .stdout, 12 },
+        .{ .image, 13 },
+        .{ .executable, 14 },
+        .{ .embedded, 15 },
+        .{ .eval_callback, 16 },
+        .{ .yield_callback, 17 },
+        .{ .sleep_callback, 18 },
+        .{ .startup_quot, 20 },
+        .{ .global, 21 },
+        .{ .shutdown_quot, 22 },
+        .{ .jit_prolog, 23 },
+        .{ .jit_primitive_word, 24 },
+        .{ .jit_primitive, 25 },
+        .{ .jit_word_jump, 26 },
+        .{ .jit_word_call, 27 },
+        .{ .jit_if_word, 28 },
+        .{ .jit_if, 29 },
+        .{ .jit_safepoint, 30 },
+        .{ .jit_epilog, 31 },
+        .{ .jit_return, 32 },
+        .{ .jit_unused, 33 },
+        .{ .jit_push_literal, 34 },
+        .{ .jit_dip_word, 35 },
+        .{ .jit_dip, 36 },
+        .{ .jit_2dip_word, 37 },
+        .{ .jit_2dip, 38 },
+        .{ .jit_3dip_word, 39 },
+        .{ .jit_3dip, 40 },
+        .{ .jit_execute, 41 },
+        .{ .jit_declare_word, 42 },
+        .{ .c_to_factor_word, 43 },
+        .{ .lazy_jit_compile_word, 44 },
+        .{ .unwind_native_frames_word, 45 },
+        .{ .get_fpu_state_word, 46 },
+        .{ .set_fpu_state_word, 47 },
+        .{ .signal_handler_word, 48 },
+        .{ .leaf_signal_handler_word, 49 },
+        .{ .win_exception_handler, 50 },
+        .{ .sample_callstacks, 51 },
+        .{ .redefinition_counter, 52 },
+        .{ .callback_stub, 53 },
+        .{ .pic_load, 54 },
+        .{ .pic_tag, 55 },
+        .{ .pic_tuple, 56 },
+        .{ .pic_check_tag, 57 },
+        .{ .pic_check_tuple, 58 },
+        .{ .pic_hit, 59 },
+        .{ .pic_miss_word, 60 },
+        .{ .pic_miss_tail_word, 61 },
+        .{ .mega_lookup, 62 },
+        .{ .mega_lookup_word, 63 },
+        .{ .mega_miss_word, 64 },
+        .{ .undefined, 65 },
+        .{ .stderr, 66 },
+        .{ .stage2, 67 },
+        .{ .current_thread, 68 },
+        .{ .threads, 69 },
+        .{ .run_queue, 70 },
+        .{ .sleep_queue, 71 },
+        .{ .vm_compiler, 72 },
+        .{ .waiting_callbacks, 73 },
+        .{ .signal_pipe, 74 },
+        .{ .vm_compile_time, 75 },
+        .{ .vm_version, 76 },
+        .{ .vm_git_label, 77 },
+        .{ .canonical_true, 78 },
+        .{ .bignum_zero, 79 },
+        .{ .bignum_pos_one, 80 },
+        .{ .bignum_neg_one, 81 },
+    };
+    for (expected) |pair| {
+        try std.testing.expectEqual(pair[1], @intFromEnum(pair[0]));
+    }
+    // Every enum member is covered above.
+    try std.testing.expectEqual(expected.len, @typeInfo(SpecialObject).@"enum".fields.len);
+    // Indices stay inside the special object table (C++: special_object_count = 85).
+    try std.testing.expectEqual(@as(Cell, 85), special_object_count);
+    for (expected) |pair| {
+        try std.testing.expect(pair[1] < special_object_count);
+    }
+    try std.testing.expectEqual(@as(Cell, 4), context_object_count);
+}
+
+test "isSaveSpecial keeps exactly the ranges the image saver preserves" {
+    // Reference predicate transcribed from vm/objects.hpp save_special_p.
+    const Ref = struct {
+        fn saved(i: Cell) bool {
+            return (i >= 20 and i <= 49) or (i >= 52 and i <= 65) or i == 67 or (i >= 78 and i <= 81);
+        }
+    };
+    var i: Cell = 0;
+    while (i < special_object_count + 4) : (i += 1) {
+        try std.testing.expectEqual(Ref.saved(i), isSaveSpecial(i));
+    }
+    // Spot checks on the boundaries and the gaps.
+    try std.testing.expect(!isSaveSpecial(19));
+    try std.testing.expect(isSaveSpecial(20));
+    try std.testing.expect(isSaveSpecial(49));
+    try std.testing.expect(!isSaveSpecial(50));
+    try std.testing.expect(!isSaveSpecial(51));
+    try std.testing.expect(isSaveSpecial(52));
+    try std.testing.expect(isSaveSpecial(65));
+    try std.testing.expect(!isSaveSpecial(66));
+    try std.testing.expect(isSaveSpecial(67));
+    try std.testing.expect(!isSaveSpecial(68));
+    try std.testing.expect(!isSaveSpecial(77));
+    try std.testing.expect(isSaveSpecial(78));
+    try std.testing.expect(isSaveSpecial(81));
+    try std.testing.expect(!isSaveSpecial(82));
+}

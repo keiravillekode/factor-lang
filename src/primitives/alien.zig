@@ -543,3 +543,525 @@ pub export fn primitive_free_callback(vm_asm: *VMAssemblyFields) callconv(.c) vo
         }
     }
 }
+
+// --- Tests ---
+
+const testing = std.testing;
+
+const AlienTestVM = struct {
+    vm: *FactorVM,
+    heap: *@import("../data_heap.zig").DataHeap,
+    stack_base: Cell,
+    true_obj: Cell,
+
+    fn init() !AlienTestVM {
+        const data_heap_mod = @import("../data_heap.zig");
+        const objects = @import("../objects.zig");
+        const allocator = testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        // vm.gc stays null, so the nursery must hold every allocation of a test.
+        const heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        // canonical_true is f in a bare VM; install a sentinel so t and f differ.
+        const true_obj = layouts.tagFixnum(0x7472_7565);
+        vm.vm_asm.special_objects[@intFromEnum(objects.SpecialObject.canonical_true)] = true_obj;
+        return .{
+            .vm = vm,
+            .heap = heap,
+            .stack_base = vm.vm_asm.ctx.datastack,
+            .true_obj = true_obj,
+        };
+    }
+
+    fn deinit(self: *AlienTestVM) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fields(self: *AlienTestVM) *VMAssemblyFields {
+        return &self.vm.vm_asm;
+    }
+
+    fn push(self: *AlienTestVM, cell: Cell) void {
+        self.vm.push(cell);
+    }
+
+    fn pushFixnum(self: *AlienTestVM, n: Fixnum) void {
+        self.vm.push(layouts.tagFixnum(n));
+    }
+
+    fn pop(self: *AlienTestVM) Cell {
+        return self.vm.pop();
+    }
+
+    fn popFixnum(self: *AlienTestVM) !Fixnum {
+        const cell = self.vm.pop();
+        try testing.expect(layouts.hasTag(cell, .fixnum));
+        return layouts.untagFixnum(cell);
+    }
+
+    fn popAlien(self: *AlienTestVM) !*layouts.Alien {
+        return alienFrom(self.vm.pop());
+    }
+
+    fn byteArray(self: *AlienTestVM, bytes: []const u8) Cell {
+        const tagged = self.vm.allotByteArray(bytes.len);
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        @memcpy(ba.data()[0..bytes.len], bytes);
+        return tagged;
+    }
+
+    // ( obj offset -- value )
+    fn read(self: *AlienTestVM, prim: *const fn (*VMAssemblyFields) callconv(.c) void, obj: Cell, offset: Fixnum) Cell {
+        self.push(obj);
+        self.pushFixnum(offset);
+        prim(self.fields());
+        return self.pop();
+    }
+
+    // ( value obj offset -- )
+    fn write(self: *AlienTestVM, prim: *const fn (*VMAssemblyFields) callconv(.c) void, obj: Cell, offset: Fixnum, value: Cell) void {
+        self.push(value);
+        self.push(obj);
+        self.pushFixnum(offset);
+        prim(self.fields());
+    }
+
+    fn expectStackBalanced(self: *AlienTestVM) !void {
+        try testing.expectEqual(self.stack_base, self.vm.vm_asm.ctx.datastack);
+    }
+};
+
+fn alienFrom(cell: Cell) !*layouts.Alien {
+    try testing.expect(layouts.hasTag(cell, .alien));
+    return @ptrFromInt(layouts.UNTAG(cell));
+}
+
+fn byteArrayData(tagged: Cell) [*]u8 {
+    const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+    return ba.data();
+}
+
+fn bignumCell(cell: Cell) !Cell {
+    try testing.expect(layouts.hasTag(cell, .bignum));
+    const bn: *const bignum.Bignum = @ptrFromInt(layouts.UNTAG(cell));
+    return bignum.toCell(bn);
+}
+
+fn bignumInt64(cell: Cell) !i64 {
+    try testing.expect(layouts.hasTag(cell, .bignum));
+    const bn: *const bignum.Bignum = @ptrFromInt(layouts.UNTAG(cell));
+    return bignum.toInt64(bn);
+}
+
+test "displaced-alien over a byte array, an alien and a pinned address" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    const ba = t.byteArray(&[_]u8{0} ** 16);
+    const ba_data = @intFromPtr(byteArrayData(ba));
+
+    // Displacement 0 hands back the original object untouched.
+    t.pushFixnum(0);
+    t.push(ba);
+    primitive_displaced_alien(t.fields());
+    try testing.expectEqual(ba, t.pop());
+
+    // Over a byte array: base is the byte array, address points into its data.
+    t.pushFixnum(4);
+    t.push(ba);
+    primitive_displaced_alien(t.fields());
+    const a1_cell = t.vm.peek();
+    const a1 = try t.popAlien();
+    try testing.expectEqual(ba, a1.base);
+    try testing.expectEqual(layouts.false_object, a1.expired);
+    try testing.expectEqual(@as(Cell, 4), a1.displacement);
+    try testing.expectEqual(ba_data + 4, a1.address);
+    try testing.expectEqual(ba_data + 4, @intFromPtr(t.vm.alienOffset(a1_cell).?));
+
+    // Over that alien: displacements accumulate, the base stays the byte array.
+    t.pushFixnum(6);
+    t.push(a1_cell);
+    primitive_displaced_alien(t.fields());
+    const a2 = try t.popAlien();
+    try testing.expectEqual(ba, a2.base);
+    try testing.expectEqual(@as(Cell, 10), a2.displacement);
+    try testing.expectEqual(ba_data + 10, a2.address);
+
+    // Over f (a raw address): base stays f and the address is the displacement.
+    t.pushFixnum(0x1000);
+    t.push(layouts.false_object);
+    primitive_displaced_alien(t.fields());
+    const raw_cell = t.vm.peek();
+    const raw = try t.popAlien();
+    try testing.expectEqual(layouts.false_object, raw.base);
+    try testing.expectEqual(@as(Cell, 0x1000), raw.displacement);
+    try testing.expectEqual(@as(Cell, 0x1000), raw.address);
+
+    t.pushFixnum(0x10);
+    t.push(raw_cell);
+    primitive_displaced_alien(t.fields());
+    const raw2 = try t.popAlien();
+    try testing.expectEqual(layouts.false_object, raw2.base);
+    try testing.expectEqual(@as(Cell, 0x1010), raw2.address);
+
+    // A bignum displacement is honoured (it used to be dropped to 0).
+    const big = try bignum.fromUint64(t.vm, @as(u64, 1) << 62);
+    t.push(layouts.tagBignum(big));
+    t.push(layouts.false_object);
+    primitive_displaced_alien(t.fields());
+    const big_alien = try t.popAlien();
+    try testing.expectEqual(@as(Cell, 1) << 62, big_alien.address);
+
+    try t.expectStackBalanced();
+}
+
+test "alien-address of pinned aliens and f" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    // f has address 0.
+    t.push(layouts.false_object);
+    primitive_alien_address(t.fields());
+    try testing.expectEqual(@as(Fixnum, 0), try t.popFixnum());
+
+    // A small address comes back as a fixnum.
+    t.push(t.vm.allotAlien(layouts.false_object, 0x1234));
+    primitive_alien_address(t.fields());
+    try testing.expectEqual(@as(Fixnum, 0x1234), try t.popFixnum());
+
+    // An address with the high bit set does not fit a fixnum.
+    const high: Cell = 0xFFFF_FFFF_FFFF_FFF0;
+    t.push(t.vm.allotAlien(layouts.false_object, high));
+    primitive_alien_address(t.fields());
+    try testing.expectEqual(high, try bignumCell(t.pop()));
+
+    try t.expectStackBalanced();
+}
+
+test "alien integer accessors read every width with the right signedness" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    const ba = t.byteArray(&[_]u8{
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+    });
+
+    try testing.expectEqual(layouts.tagFixnum(-1), t.read(&primitive_alien_signed_1, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(255), t.read(&primitive_alien_unsigned_1, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(-1), t.read(&primitive_alien_signed_2, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(65535), t.read(&primitive_alien_unsigned_2, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(-1), t.read(&primitive_alien_signed_4, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(4294967295), t.read(&primitive_alien_unsigned_4, ba, 0));
+    try testing.expectEqual(layouts.tagFixnum(-1), t.read(&primitive_alien_signed_8, ba, 0));
+    try testing.expectEqual(@as(Cell, std.math.maxInt(u64)), try bignumCell(t.read(&primitive_alien_unsigned_8, ba, 0)));
+
+    // The second half holds 0x8000000000000000.
+    try testing.expectEqual(@as(i64, std.math.minInt(i64)), try bignumInt64(t.read(&primitive_alien_signed_8, ba, 8)));
+    try testing.expectEqual(@as(Cell, 1) << 63, try bignumCell(t.read(&primitive_alien_unsigned_8, ba, 8)));
+    try testing.expectEqual(layouts.tagFixnum(0), t.read(&primitive_alien_signed_4, ba, 8));
+    try testing.expectEqual(layouts.tagFixnum(std.math.minInt(i32)), t.read(&primitive_alien_signed_4, ba, 12));
+    try testing.expectEqual(layouts.tagFixnum(1 << 31), t.read(&primitive_alien_unsigned_4, ba, 12));
+    try testing.expectEqual(layouts.tagFixnum(std.math.minInt(i16)), t.read(&primitive_alien_signed_2, ba, 14));
+    try testing.expectEqual(layouts.tagFixnum(1 << 15), t.read(&primitive_alien_unsigned_2, ba, 14));
+    try testing.expectEqual(layouts.tagFixnum(-128), t.read(&primitive_alien_signed_1, ba, 15));
+    try testing.expectEqual(layouts.tagFixnum(128), t.read(&primitive_alien_unsigned_1, ba, 15));
+
+    // The signed/unsigned cell primitives are the 8-byte ones.
+    try testing.expectEqual(&primitive_alien_signed_8, &primitive_alien_signed_cell);
+    try testing.expectEqual(&primitive_alien_unsigned_8, &primitive_alien_unsigned_cell);
+
+    // Through a displaced alien the offset is added to the alien's address.
+    t.pushFixnum(8);
+    t.push(ba);
+    primitive_displaced_alien(t.fields());
+    const displaced = t.pop();
+    try testing.expectEqual(layouts.tagFixnum(128), t.read(&primitive_alien_unsigned_1, displaced, 7));
+    try testing.expectEqual(layouts.tagFixnum(255), t.read(&primitive_alien_unsigned_1, displaced, -1));
+
+    try t.expectStackBalanced();
+}
+
+test "alien integer setters truncate fixnums and accept bignums" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    const ba = t.byteArray(&[_]u8{0} ** 16);
+    const data = byteArrayData(ba);
+
+    t.write(&primitive_set_alien_unsigned_1, ba, 3, layouts.tagFixnum(0x1FF));
+    try testing.expectEqual(@as(u8, 0xFF), data[3]);
+    t.write(&primitive_set_alien_signed_1, ba, 4, layouts.tagFixnum(-2));
+    try testing.expectEqual(@as(u8, 0xFE), data[4]);
+    t.write(&primitive_set_alien_signed_2, ba, 6, layouts.tagFixnum(-2));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xFE, 0xFF }, data[6..8]);
+    t.write(&primitive_set_alien_unsigned_2, ba, 6, layouts.tagFixnum(0x1_ABCD));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xCD, 0xAB }, data[6..8]);
+    t.write(&primitive_set_alien_unsigned_4, ba, 8, layouts.tagFixnum(0xDEADBEEF));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xEF, 0xBE, 0xAD, 0xDE }, data[8..12]);
+    t.write(&primitive_set_alien_signed_4, ba, 12, layouts.tagFixnum(-1));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF }, data[12..16]);
+
+    // 8-byte stores take fixnums and bignums alike.
+    t.write(&primitive_set_alien_signed_8, ba, 0, layouts.tagFixnum(1));
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 }, data[0..8]);
+    const neg = try bignum.fromInt64(t.vm, -(@as(i64, 1) << 62));
+    t.write(&primitive_set_alien_signed_8, ba, 0, layouts.tagBignum(neg));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0xC0 }, data[0..8]);
+    const all_ones = try bignum.fromUint64(t.vm, std.math.maxInt(u64));
+    t.write(&primitive_set_alien_unsigned_8, ba, 8, layouts.tagBignum(all_ones));
+    try testing.expectEqualSlices(u8, &[_]u8{0xFF} ** 8, data[8..16]);
+    @memset(data[8..16], 0);
+    t.write(&primitive_set_alien_unsigned_8, ba, 8, layouts.tagFixnum(-1));
+    try testing.expectEqualSlices(u8, &[_]u8{0xFF} ** 8, data[8..16]);
+
+    // Round trips through the matching reader.
+    try testing.expectEqual(@as(i64, -(@as(i64, 1) << 62)), try bignumInt64(t.read(&primitive_alien_signed_8, ba, 0)));
+    try testing.expectEqual(layouts.tagFixnum(-1), t.read(&primitive_alien_signed_8, ba, 8));
+
+    try t.expectStackBalanced();
+}
+
+test "alien float and double accessors" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    const ba = t.byteArray(&[_]u8{0} ** 16);
+    const data = byteArrayData(ba);
+
+    const boxed = try float_mod.allocBoxedFloat(t.vm, 1.5);
+    t.write(&primitive_set_alien_float, ba, 0, layouts.tagFloat(boxed));
+    try testing.expectEqual(@as(u32, 0x3FC00000), std.mem.readInt(u32, data[0..4], .little));
+    t.write(&primitive_set_alien_double, ba, 8, layouts.tagFloat(boxed));
+    try testing.expectEqual(@as(u64, 0x3FF8000000000000), std.mem.readInt(u64, data[8..16], .little));
+
+    const f = t.read(&primitive_alien_float, ba, 0);
+    try testing.expect(layouts.hasTag(f, .float));
+    try testing.expectEqual(@as(f64, 1.5), float_mod.untagFloat(f));
+    const d = t.read(&primitive_alien_double, ba, 8);
+    try testing.expect(layouts.hasTag(d, .float));
+    try testing.expectEqual(@as(f64, 1.5), float_mod.untagFloat(d));
+
+    // A float32 read widens exactly; a non-float value is silently not stored.
+    std.mem.writeInt(u32, data[4..8], 0x40490FDB, .little);
+    const pi_f32: f32 = @bitCast(@as(u32, 0x40490FDB));
+    try testing.expectEqual(@as(f64, pi_f32), float_mod.untagFloat(t.read(&primitive_alien_float, ba, 4)));
+    t.write(&primitive_set_alien_float, ba, 4, layouts.tagFixnum(7));
+    try testing.expectEqual(@as(u32, 0x40490FDB), std.mem.readInt(u32, data[4..8], .little));
+    t.write(&primitive_set_alien_double, ba, 8, layouts.false_object);
+    try testing.expectEqual(@as(u64, 0x3FF8000000000000), std.mem.readInt(u64, data[8..16], .little));
+
+    try t.expectStackBalanced();
+}
+
+test "alien-cell reads and writes pointers as pinned aliens" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    const ba = t.byteArray(&[_]u8{0} ** 16);
+    const data = byteArrayData(ba);
+
+    // A zero cell reads as f.
+    try testing.expectEqual(layouts.false_object, t.read(&primitive_alien_cell, ba, 0));
+
+    // Storing a pinned alien writes its address; f writes 0.
+    const pinned = t.vm.allotAlien(layouts.false_object, 0xABCD_0000);
+    t.write(&primitive_set_alien_cell, ba, 0, pinned);
+    try testing.expectEqual(@as(u64, 0xABCD_0000), std.mem.readInt(u64, data[0..8], .little));
+
+    const read_back = try alienFrom(t.read(&primitive_alien_cell, ba, 0));
+    try testing.expectEqual(layouts.false_object, read_back.base);
+    try testing.expectEqual(layouts.false_object, read_back.expired);
+    try testing.expectEqual(@as(Cell, 0xABCD_0000), read_back.address);
+    try testing.expectEqual(@as(Cell, 0xABCD_0000), read_back.displacement);
+
+    t.write(&primitive_set_alien_cell, ba, 0, layouts.false_object);
+    try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, data[0..8], .little));
+
+    try t.expectStackBalanced();
+}
+
+test "dlsym, dlopen, dlclose and dll-valid?" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    // ( name library -- alien ): f means the global namespace.
+    t.push(t.byteArray("strlen"));
+    t.push(layouts.false_object);
+    primitive_dlsym(t.fields());
+    const strlen_alien = try t.popAlien();
+    try testing.expectEqual(layouts.false_object, strlen_alien.base);
+    const strlen_fn: *const fn ([*:0]const u8) callconv(.c) usize = @ptrFromInt(strlen_alien.address);
+    try testing.expectEqual(@as(usize, 5), strlen_fn("hello"));
+
+    t.push(t.byteArray("no_such_symbol_in_any_library"));
+    t.push(layouts.false_object);
+    primitive_dlsym(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    // f is always a valid library.
+    t.push(layouts.false_object);
+    primitive_dll_validp(t.fields());
+    try testing.expectEqual(t.true_obj, t.pop());
+
+    // A real library: valid, symbols resolve, and closing invalidates it.
+    t.push(t.byteArray("libm.so.6"));
+    primitive_dlopen(t.fields());
+    const dll_cell = t.pop();
+    try testing.expect(layouts.hasTag(dll_cell, .dll));
+    const dll: *const layouts.Dll = @ptrFromInt(layouts.UNTAG(dll_cell));
+    try testing.expect(dll.handle != null);
+    try testing.expect(layouts.hasTag(dll.path, .byte_array));
+
+    t.push(dll_cell);
+    primitive_dll_validp(t.fields());
+    try testing.expectEqual(t.true_obj, t.pop());
+
+    t.push(t.byteArray("cos"));
+    t.push(dll_cell);
+    primitive_dlsym(t.fields());
+    const cos_alien = try t.popAlien();
+    const cos_fn: *const fn (f64) callconv(.c) f64 = @ptrFromInt(cos_alien.address);
+    try testing.expectEqual(@as(f64, 1.0), cos_fn(0.0));
+
+    t.push(dll_cell);
+    primitive_dlclose(t.fields());
+    try testing.expect(dll.handle == null);
+    t.push(dll_cell);
+    primitive_dll_validp(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+    t.push(t.byteArray("cos"));
+    t.push(dll_cell);
+    primitive_dlsym(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+    // Closing twice is harmless.
+    t.push(dll_cell);
+    primitive_dlclose(t.fields());
+
+    // A missing library yields a dll object without a handle.
+    t.push(t.byteArray("/nonexistent/libnothing.so"));
+    primitive_dlopen(t.fields());
+    const bad_cell = t.pop();
+    const bad: *const layouts.Dll = @ptrFromInt(layouts.UNTAG(bad_cell));
+    try testing.expect(bad.handle == null);
+    t.push(bad_cell);
+    primitive_dll_validp(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    // An over-long path is rejected up front.
+    t.push(t.byteArray(&[_]u8{'a'} ** 1024));
+    primitive_dlopen(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    try t.expectStackBalanced();
+}
+
+test "current-callback reports the innermost callback id" {
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    primitive_current_callback(t.fields());
+    try testing.expectEqual(@as(Fixnum, 0), try t.popFixnum());
+
+    try t.vm.callback_ids.append(testing.allocator, 3);
+    try t.vm.callback_ids.append(testing.allocator, 9);
+    primitive_current_callback(t.fields());
+    try testing.expectEqual(@as(Fixnum, 9), try t.popFixnum());
+    _ = t.vm.callback_ids.pop();
+    primitive_current_callback(t.fields());
+    try testing.expectEqual(@as(Fixnum, 3), try t.popFixnum());
+
+    try t.expectStackBalanced();
+}
+
+test "callback primitive fills a stub from the template and free-callback releases it" {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+
+    const callbacks = @import("../callbacks.zig");
+    const objects = @import("../objects.zig");
+
+    var t = try AlienTestVM.init();
+    defer t.deinit();
+
+    var heap = try callbacks.CallbackHeap.init(testing.allocator, 64 * 1024);
+    defer heap.deinit();
+    t.vm.callbacks = &heap;
+
+    // Template: 32 bytes of int3 with four absolute-cell operands at 8-byte
+    // steps. On x86-64 the heap stores vm_ptr at operands 0 and 2, the word's
+    // entry point at 1 and the return rewind at 3.
+    const Entry = code_blocks.RelocationEntry;
+    var reloc_bytes: [4 * @sizeOf(Entry)]u8 = undefined;
+    const entries = [_]Entry{
+        Entry.init(.vm, .absolute_cell, 8),
+        Entry.init(.entry_point, .absolute_cell, 16),
+        Entry.init(.vm, .absolute_cell, 24),
+        Entry.init(.untagged, .absolute_cell, 32),
+    };
+    for (entries, 0..) |e, i| {
+        std.mem.writeInt(u32, reloc_bytes[i * 4 ..][0..4], e.value, .little);
+    }
+    const reloc_ba = t.byteArray(&reloc_bytes);
+    const insns_ba = t.byteArray(&[_]u8{0xCC} ** 32);
+    const stub_array = t.vm.allotArray(2, layouts.false_object) orelse return error.OutOfMemory;
+    const stub_arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(stub_array));
+    stub_arr.data()[0] = reloc_ba;
+    stub_arr.data()[1] = insns_ba;
+    t.vm.vm_asm.special_objects[@intFromEnum(objects.SpecialObject.callback_stub)] = stub_array;
+
+    // The owner word supplies the entry point patched in by update().
+    const word_cell = t.vm.allotObject(.word, @sizeOf(layouts.Word)) orelse return error.OutOfMemory;
+    const word: *layouts.Word = @ptrFromInt(layouts.UNTAG(word_cell));
+    word.hashcode_field = layouts.tagFixnum(0);
+    word.name = layouts.false_object;
+    word.vocabulary = layouts.false_object;
+    word.def = layouts.false_object;
+    word.props = layouts.false_object;
+    word.pic_def = layouts.false_object;
+    word.pic_tail_def = layouts.false_object;
+    word.subprimitive = layouts.false_object;
+    word.entry_point = 0x1122_3344_5566_7788;
+
+    // ( word return-rewind -- alien )
+    t.push(word_cell);
+    t.pushFixnum(0x40);
+    primitive_callback(t.fields());
+    const cb_cell = t.vm.peek();
+    const cb = try t.popAlien();
+    try testing.expectEqual(layouts.false_object, cb.base);
+    try testing.expect(heap.segment.?.contains(cb.address));
+
+    const stub: *code_blocks.CodeBlock = @ptrFromInt(cb.address - @sizeOf(code_blocks.CodeBlock));
+    try testing.expect(!stub.isFree());
+    try testing.expectEqual(word_cell, stub.owner);
+    try testing.expectEqual(@as(Cell, 32), stub.codeSize());
+    const code: [*]const u8 = @ptrFromInt(cb.address);
+    const vm_ptr: Cell = @intFromPtr(&t.vm.vm_asm);
+    try testing.expectEqual(vm_ptr, std.mem.readInt(u64, code[0..8], .little));
+    try testing.expectEqual(@as(u64, 0x1122_3344_5566_7788), std.mem.readInt(u64, code[8..16], .little));
+    try testing.expectEqual(vm_ptr, std.mem.readInt(u64, code[16..24], .little));
+    try testing.expectEqual(@as(u64, 0x40), std.mem.readInt(u64, code[24..32], .little));
+
+    try testing.expectEqual(stub.size(), heap.room().occupied_space);
+
+    // free-callback marks the stub free and returns its bytes to the heap.
+    t.push(cb_cell);
+    primitive_free_callback(t.fields());
+    try testing.expect(stub.isFree());
+    try testing.expectEqual(@as(Cell, 0), heap.room().occupied_space);
+
+    // Without a template, no stub can be made.
+    t.vm.vm_asm.special_objects[@intFromEnum(objects.SpecialObject.callback_stub)] = layouts.false_object;
+    try testing.expect(heap.add(word_cell, 0, vm_ptr, t.vm) == null);
+
+    try t.expectStackBalanced();
+}

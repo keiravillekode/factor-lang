@@ -521,3 +521,250 @@ test "call site patcher" {
         else => return error.SkipZigTest,
     }
 }
+
+// --- Tests over a bare VM with data and code heaps (see jit.test_support) ---
+
+const ts = jit.test_support;
+const testing = std.testing;
+
+/// One-byte marker templates so PIC code reads as a string of template
+/// letters, plus miss-handler words whose subprimitive emits "Z" / "Y".
+fn installPicMarkers(f: *ts.Fixture) void {
+    f.install(.jit_prolog, &.{}, "P");
+    f.install(.jit_push_literal, &.{}, "L");
+    f.install(.pic_load, &.{}, "O");
+    f.install(.pic_tag, &.{}, "T");
+    f.install(.pic_tuple, &.{}, "V");
+    f.install(.pic_check_tag, &.{}, "K");
+    f.install(.pic_check_tuple, &.{}, "U");
+    f.install(.pic_hit, &.{}, "H");
+    const miss = f.template(&.{}, "Z");
+    f.setSpecial(.pic_miss_word, f.word(f.array(&.{ layouts.false_object, layouts.false_object, miss })));
+    const miss_tail = f.template(&.{}, "Y");
+    f.setSpecial(.pic_miss_tail_word, f.word(f.array(&.{ layouts.false_object, layouts.false_object, miss_tail })));
+}
+
+test "inline cache jit emits tag checks, hits and the miss handler" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installPicMarkers(&f);
+
+    const generic = f.word(layouts.false_object);
+    const m1 = f.word(layouts.false_object);
+    const m2 = f.quotation(&.{});
+    const methods = f.array(&.{ layouts.false_object, layouts.false_object });
+    // Class 0 (fixnum) in the first slot of a tag PIC needs no check.
+    const entries = f.array(&.{ layouts.tagFixnum(0), m1, layouts.tagFixnum(3), m2 });
+
+    var ic = InlineCacheJit.init(f.vm, .tag, generic);
+    ic.registerRoot();
+    defer ic.deinit();
+    try ic.emitInlineCache(1, generic, methods, entries, false);
+
+    try testing.expectEqualSlices(u8, "OTHKHPLLLLZ", ic.base_jit.code.items);
+    try testing.expectEqualSlices(Cell, &.{
+        layouts.tagFixnum(-1 * @sizeOf(Cell)), m1,      layouts.tagFixnum(3), m2,
+        generic,                               methods, layouts.tagFixnum(1), entries,
+    }, ts.items(&ic.base_jit.literals));
+    try testing.expectEqual(@as(u64, 1), f.vm.dispatch_stats.pic_tag_count);
+    try testing.expectEqual(@as(u64, 0), f.vm.dispatch_stats.pic_tuple_count);
+}
+
+test "inline cache jit: tuple PIC, tail-call miss handler and empty cache" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installPicMarkers(&f);
+    const generic = f.word(layouts.false_object);
+    const m1 = f.word(layouts.false_object);
+    const methods = f.array(&.{layouts.false_object});
+    const layout = f.array(&.{ layouts.tagFixnum(1), layouts.tagFixnum(0), layouts.tagFixnum(0) });
+
+    {
+        // A tuple layout class always gets a tuple check, and a tail-call
+        // site uses the tail miss word.
+        const entries = f.array(&.{ layout, m1 });
+        var ic = InlineCacheJit.init(f.vm, .tuple, generic);
+        ic.registerRoot();
+        defer ic.deinit();
+        try ic.emitInlineCache(0, generic, methods, entries, true);
+        try testing.expectEqualSlices(u8, "OVUHPLLLLY", ic.base_jit.code.items);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(0), layout, m1, generic, methods, layouts.tagFixnum(0), entries }, ts.items(&ic.base_jit.literals));
+        try testing.expectEqual(@as(u64, 1), f.vm.dispatch_stats.pic_tuple_count);
+    }
+    {
+        // No entries yet: load, dispatch prologue, then straight to the miss handler.
+        var ic = InlineCacheJit.init(f.vm, .tag, generic);
+        ic.registerRoot();
+        defer ic.deinit();
+        try ic.emitInlineCache(2, generic, methods, layouts.false_object, false);
+        try testing.expectEqualSlices(u8, "OTPLLLLZ", ic.base_jit.code.items);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(-2 * @sizeOf(Cell)), generic, methods, layouts.tagFixnum(2), layouts.false_object }, ts.items(&ic.base_jit.literals));
+    }
+    {
+        // The class-0 shortcut only applies to slot 0 of a tag PIC.
+        var ic = InlineCacheJit.init(f.vm, .tuple, generic);
+        ic.registerRoot();
+        defer ic.deinit();
+        try ic.emitCheckAndJump(.tuple, 0, layouts.tagFixnum(0), m1);
+        try ic.emitCheckAndJump(.tag, 2, layouts.tagFixnum(0), m1);
+        try ic.emitCheckAndJump(.tag, 0, layouts.tagFixnum(0), m1);
+        try testing.expectEqualSlices(u8, "KHKHH", ic.base_jit.code.items);
+    }
+}
+
+test "addInlineCacheEntry grows, replaces and deduplicates" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const k1 = layouts.tagFixnum(1);
+    const k2 = f.array(&.{layouts.tagFixnum(0)});
+    const m1 = f.word(layouts.false_object);
+    const m2 = f.word(layouts.false_object);
+    const m3 = f.word(layouts.false_object);
+
+    const first = addInlineCacheEntry(f.vm, layouts.false_object, k1, m1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(Cell, &.{ k1, m1 }, ts.arrayItems(first));
+
+    const second = addInlineCacheEntry(f.vm, first, k2, m2) orelse return error.TestUnexpectedResult;
+    try testing.expect(second != first);
+    try testing.expectEqualSlices(Cell, &.{ k1, m1, k2, m2 }, ts.arrayItems(second));
+
+    // Same class and method: nothing to do.
+    try testing.expectEqual(@as(?Cell, null), addInlineCacheEntry(f.vm, second, k2, m2));
+    // Same class, new method: updated in place.
+    try testing.expectEqual(@as(?Cell, second), addInlineCacheEntry(f.vm, second, k1, m3));
+    try testing.expectEqualSlices(Cell, &.{ k1, m3, k2, m2 }, ts.arrayItems(second));
+}
+
+test "determineInlineCacheType and megaCacheHashcode" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const m = f.word(layouts.false_object);
+    const layout = f.array(&.{layouts.tagFixnum(0)});
+
+    try testing.expectEqual(PicType.tag, determineInlineCacheType(layouts.false_object));
+    try testing.expectEqual(PicType.tag, determineInlineCacheType(f.array(&.{ layouts.tagFixnum(2), m })));
+    try testing.expectEqual(PicType.tuple, determineInlineCacheType(f.array(&.{ layout, m })));
+    try testing.expectEqual(PicType.tuple, determineInlineCacheType(f.array(&.{ layouts.tagFixnum(1), m, layout, m })));
+
+    // Tag classes hash by their untagged value into even slots; distinct
+    // classes beyond the mask collide.
+    try testing.expectEqual(@as(Cell, 10), megaCacheHashcode(layouts.tagFixnum(5), 7));
+    try testing.expectEqual(@as(Cell, 10), megaCacheHashcode(layouts.tagFixnum(13), 7));
+    try testing.expectEqual(@as(Cell, 0), megaCacheHashcode(layouts.tagFixnum(8), 7));
+    try testing.expectEqual(@as(Cell, 14), megaCacheHashcode(layouts.tagFixnum(7), 7));
+    const slot = megaCacheHashcode(layout, 31);
+    try testing.expect(slot % 2 == 0 and slot <= 62);
+    try testing.expectEqual(((layouts.UNTAG(layout) >> layouts.tag_bits) & 31) << 1, slot);
+}
+
+test "updatePicTransitions counts cold, monomorphic and megamorphic transitions" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const stats = &f.vm.dispatch_stats;
+    updatePicTransitions(f.vm, 0);
+    updatePicTransitions(f.vm, 1);
+    updatePicTransitions(f.vm, 2);
+    updatePicTransitions(f.vm, f.vm.max_pic_size);
+    try testing.expectEqual(@as(u64, 1), stats.cold_call_to_ic_transitions);
+    try testing.expectEqual(@as(u64, 1), stats.ic_to_pic_transitions);
+    try testing.expectEqual(@as(u64, 1), stats.pic_to_mega_transitions);
+}
+
+test "call site patcher rejects invalid sites and handles backward targets" {
+    switch (builtin.cpu.arch) {
+        .x86, .x86_64 => {
+            var buf = [_]u8{0x90} ** 64;
+            // Not a call or jump: no target.
+            const bogus = @intFromPtr(&buf[5]);
+            try testing.expect(!CallSitePatcher.isValidCallSite(bogus));
+            try testing.expectEqual(@as(Cell, 0), CallSitePatcher.getCallTarget(bogus));
+
+            // A call at offset 32 patched to point at the buffer start.
+            buf[32] = 0xE8;
+            const ra = @intFromPtr(&buf[37]);
+            CallSitePatcher.setCallTarget(ra, @intFromPtr(&buf[0]));
+            try testing.expectEqual(@as(i32, -37), std.mem.readInt(i32, buf[33..37], .little));
+            try testing.expectEqual(@intFromPtr(&buf[0]), CallSitePatcher.getCallTarget(ra));
+            try testing.expectEqual(@intFromPtr(&buf[0]), CallSitePatcher.getCallTargetUnchecked(ra));
+            try testing.expect(!CallSitePatcher.isTailCallSite(ra));
+            buf[32] = 0xE9;
+            try testing.expect(CallSitePatcher.isTailCallSite(ra));
+            try testing.expectEqual(@intFromPtr(&buf[0]), CallSitePatcher.getCallTarget(ra));
+        },
+        .aarch64 => {
+            var buf align(4) = [_]u8{0} ** 64;
+            const bogus = @intFromPtr(&buf[4]);
+            try testing.expect(!CallSitePatcher.isValidCallSite(bogus));
+            try testing.expectEqual(@as(Cell, 0), CallSitePatcher.getCallTarget(bogus));
+
+            std.mem.writeInt(u32, buf[32..36], 0x94000000, .little);
+            const ra = @intFromPtr(&buf[36]);
+            CallSitePatcher.setCallTarget(ra, @intFromPtr(&buf[0]));
+            try testing.expectEqual(@as(u32, 0x94000000 | (0x03ffffff & @as(u32, @bitCast(@as(i32, -8))))), std.mem.readInt(u32, buf[32..36], .little));
+            try testing.expectEqual(@intFromPtr(&buf[0]), CallSitePatcher.getCallTarget(ra));
+            try testing.expect(!CallSitePatcher.isTailCallSite(ra));
+        },
+        else => return error.SkipZigTest,
+    }
+}
+
+test "inlineCacheMiss builds a PIC, patches the call site and counts transitions" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installPicMarkers(&f);
+
+    const generic = f.word(layouts.false_object);
+    const method = f.word(layouts.false_object);
+    // Methods are indexed by type tag; the object is a fixnum (tag 0).
+    var slots: [layouts.type_count]Cell = @splat(layouts.false_object);
+    slots[0] = method;
+    const methods = f.array(&slots);
+    const obj = layouts.tagFixnum(5);
+    const ra = try f.callSite();
+    const site_target = CallSitePatcher.getCallTarget(ra);
+    const base = f.vm.vm_asm.ctx.datastack;
+
+    // The miss handler pushes generic, methods, index and cache entries; the
+    // dispatched object sits below them at `index` cells from the top.
+    f.vm.push(obj);
+    f.vm.push(generic);
+    f.vm.push(methods);
+    f.vm.push(layouts.tagFixnum(0));
+    f.vm.push(layouts.false_object);
+    const xt = inlineCacheMiss(f.vm, ra);
+
+    try testing.expect(xt != 0);
+    try testing.expect(f.inCodeHeap(xt));
+    const pic: *code_blocks.CodeBlock = @ptrFromInt(xt - @sizeOf(code_blocks.CodeBlock));
+    try testing.expect(pic.isPic());
+    try testing.expectEqual(generic, pic.owner);
+    try testing.expect(!f.code_heap.isBlockUninitialized(pic));
+    // One entry for class 0 in slot 0: no check, just the hit, then the miss path.
+    try testing.expectEqualSlices(u8, "OTHPLLLLZ", pic.codeStart()[0..9]);
+    try testing.expect(site_target != xt);
+    try testing.expectEqual(xt, CallSitePatcher.getCallTarget(ra));
+    try testing.expectEqual(@as(u64, 1), f.vm.dispatch_stats.cold_call_to_ic_transitions);
+    try testing.expectEqual(@as(u64, 1), f.vm.dispatch_stats.pic_tag_count);
+    try testing.expectEqual(obj, f.vm.pop());
+    try testing.expectEqual(base, f.vm.vm_asm.ctx.datastack);
+    try testing.expectEqual(@as(usize, 0), f.vm.code_roots.items.len);
+
+    // A full cache goes megamorphic: fall back to the generic word's entry
+    // point (0 here) and leave the call site alone.
+    const full = f.array(&.{ layouts.tagFixnum(1), method, layouts.tagFixnum(2), method, layouts.tagFixnum(3), method });
+    f.vm.push(obj);
+    f.vm.push(generic);
+    f.vm.push(methods);
+    f.vm.push(layouts.tagFixnum(0));
+    f.vm.push(full);
+    try testing.expectEqual(@as(Cell, 0), inlineCacheMiss(f.vm, ra));
+    try testing.expectEqual(xt, CallSitePatcher.getCallTarget(ra));
+    try testing.expectEqual(@as(u64, 1), f.vm.dispatch_stats.pic_to_mega_transitions);
+    try testing.expectEqual(obj, f.vm.pop());
+}

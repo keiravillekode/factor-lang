@@ -1420,3 +1420,717 @@ test "undefined label error" {
     const result = mgr.fixupLabels(code_buffer.items);
     try std.testing.expectError(error.UndefinedLabel, result);
 }
+
+// =============================================================================
+// Test support: a bare VM with a data heap and a small RWX code heap, no image,
+// no GC. Shared with the inline_cache.zig tests. Only analyzed by tests.
+// =============================================================================
+pub const test_support = struct {
+    const data_heap_mod = @import("data_heap.zig");
+    const segments = @import("segments.zig");
+    const free_list = @import("free_list.zig");
+    const code_heap_mod = @import("code_heap.zig");
+    const write_barrier = @import("write_barrier.zig");
+
+    pub const code_heap_size: Cell = 256 * 1024;
+
+    /// Must live at a stable address: the JIT roots and the code heap's free
+    /// list pointer point into it.
+    pub const Fixture = struct {
+        vm: *FactorVM,
+        heap: *data_heap_mod.DataHeap,
+        seg: segments.Segment,
+        code_alloc: free_list.FreeListAllocator,
+        code_heap: code_heap_mod.CodeHeap,
+
+        pub fn init(self: *Fixture) !void {
+            const allocator = std.testing.allocator;
+            self.vm = try FactorVM.init(allocator);
+            self.vm.vm_asm.ctx = try self.vm.newContext();
+            self.vm.vm_asm.spare_ctx = try self.vm.newContext();
+            // vm.gc stays null, so the nursery must hold every allocation.
+            self.heap = try data_heap_mod.DataHeap.init(allocator, 512 * 1024, 64 * 1024, 64 * 1024);
+            self.vm.setDataHeap(self.heap);
+            self.seg = try segments.Segment.init(code_heap_size, true);
+            self.code_alloc = free_list.FreeListAllocator.init(allocator, self.seg.start, self.seg.size);
+            self.code_heap = .{
+                .seg = null,
+                .free_list = &self.code_alloc,
+                .safepoint_page = 0,
+                .code_start = self.seg.start,
+                .code_size = self.seg.size,
+                .allocator = allocator,
+                .remembered_sets = write_barrier.CodeHeapRememberedSets.init(allocator),
+                .marks = null,
+            };
+            self.vm.code = &self.code_heap;
+        }
+
+        pub fn deinit(self: *Fixture) void {
+            self.vm.code = null;
+            self.code_heap.deinit();
+            self.code_alloc.deinit();
+            self.seg.deinit();
+            self.vm.cards_array = null;
+            self.vm.decks_array = null;
+            self.vm.deinit();
+            self.heap.deinit();
+        }
+
+        pub fn inCodeHeap(self: *const Fixture, addr: Cell) bool {
+            return addr >= self.code_heap.code_start and addr < self.code_heap.code_start + self.code_heap.code_size;
+        }
+
+        pub fn special(self: *Fixture, which: objects.SpecialObject) Cell {
+            return self.vm.vm_asm.special_objects[@intFromEnum(which)];
+        }
+
+        pub fn setSpecial(self: *Fixture, which: objects.SpecialObject, value: Cell) void {
+            self.vm.vm_asm.special_objects[@intFromEnum(which)] = value;
+        }
+
+        pub fn byteArray(self: *Fixture, bytes: []const u8) Cell {
+            const tagged = self.vm.allotByteArray(bytes.len);
+            const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+            @memcpy(ba.data()[0..bytes.len], bytes);
+            return tagged;
+        }
+
+        pub fn array(self: *Fixture, elements: []const Cell) Cell {
+            const tagged = self.vm.allotArray(elements.len, layouts.false_object) orelse @panic("OOM");
+            const arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(tagged));
+            @memcpy(arr.data()[0..elements.len], elements);
+            return tagged;
+        }
+
+        /// A JIT template: { relocation byte array (or f), machine code }.
+        pub fn template(self: *Fixture, relocs: []const code_blocks.RelocationEntry, code: []const u8) Cell {
+            const reloc_cell = if (relocs.len == 0) layouts.false_object else self.byteArray(std.mem.sliceAsBytes(relocs));
+            const code_cell = self.byteArray(code);
+            return self.array(&.{ reloc_cell, code_cell });
+        }
+
+        pub fn install(self: *Fixture, which: objects.SpecialObject, relocs: []const code_blocks.RelocationEntry, code: []const u8) void {
+            self.setSpecial(which, self.template(relocs, code));
+        }
+
+        /// A word whose only meaningful slot is `subprimitive` (f or a template array).
+        pub fn word(self: *Fixture, subprimitive: Cell) Cell {
+            const tagged = self.vm.allotObject(.word, @sizeOf(layouts.Word)) orelse @panic("OOM");
+            const w: *layouts.Word = @ptrFromInt(layouts.UNTAG(tagged));
+            w.hashcode_field = layouts.tagFixnum(0);
+            w.name = layouts.false_object;
+            w.vocabulary = layouts.false_object;
+            w.def = layouts.false_object;
+            w.props = layouts.false_object;
+            w.pic_def = layouts.false_object;
+            w.pic_tail_def = layouts.false_object;
+            w.subprimitive = subprimitive;
+            w.entry_point = 0;
+            return tagged;
+        }
+
+        /// A quotation over `elements`, or one with no array when null.
+        pub fn quotation(self: *Fixture, elements: ?[]const Cell) Cell {
+            const arr = if (elements) |e| self.array(e) else layouts.false_object;
+            const tagged = self.vm.allotObject(.quotation, @sizeOf(layouts.Quotation)) orelse @panic("OOM");
+            const q: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(tagged));
+            q.array = arr;
+            q.cached_effect = layouts.false_object;
+            q.cache_counter = layouts.false_object;
+            q.entry_point = 0;
+            return tagged;
+        }
+
+        pub fn wrapper(self: *Fixture, object: Cell) Cell {
+            const tagged = self.vm.allotObject(.wrapper, @sizeOf(layouts.Wrapper)) orelse @panic("OOM");
+            const w: *layouts.Wrapper = @ptrFromInt(layouts.UNTAG(tagged));
+            w.object = object;
+            return tagged;
+        }
+
+        /// A code block carved from the code heap holding one call instruction
+        /// whose target is its own entry point. Returns the return address.
+        pub fn callSite(self: *Fixture) !Cell {
+            const block = self.code_heap.allocate(64) orelse return error.OutOfMemory;
+            block.initialize(.unoptimized, 64, JIT_FRAME_SIZE);
+            block.owner = layouts.false_object;
+            block.parameters = layouts.false_object;
+            block.relocation = layouts.false_object;
+            const code = block.codeStart();
+            var bytes: std.ArrayList(u8) = .empty;
+            defer bytes.deinit(std.testing.allocator);
+            switch (cpu.Arch.current()) {
+                .x86_64 => try cpu.X86Instruction.encodeCall(std.testing.allocator, &bytes, -5),
+                .aarch64 => try cpu.ARM64Instruction.encodeCall(std.testing.allocator, &bytes, 0),
+                else => return error.SkipZigTest,
+            }
+            @memcpy(code[0..bytes.items.len], bytes.items);
+            return block.entryPoint() + bytes.items.len;
+        }
+    };
+
+    pub fn items(g: *const growable.GrowableArray) []const Cell {
+        const arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(g.elements));
+        return arr.data()[0..g.count];
+    }
+
+    pub fn arrayItems(cell: Cell) []const Cell {
+        const arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(cell));
+        return arr.data()[0..layouts.untagFixnumUnsigned(arr.capacity)];
+    }
+
+    pub fn byteArrayItems(cell: Cell) []const u8 {
+        const ba: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(cell));
+        return ba.data()[0..layouts.untagFixnumUnsigned(ba.capacity)];
+    }
+};
+
+const ts = test_support;
+const testing = std.testing;
+
+fn relocEntries(j: *const Jit) []align(1) const code_blocks.RelocationEntry {
+    return std.mem.bytesAsSlice(code_blocks.RelocationEntry, j.relocation.items);
+}
+
+test "patchRelativeJump patches x86-64 rel32 forward and backward and rejects overruns" {
+    if (cpu.Arch.current() != .x86_64) return error.SkipZigTest;
+    var buf = [_]u8{ 0xE9, 0, 0, 0, 0, 0x90, 0xE8, 0, 0, 0, 0, 0x90 };
+    // Forward: jump at 0 to 12 (end of buffer): rel = 12 - 5.
+    try patchRelativeJump(&buf, 0, 12);
+    try testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, buf[1..5], .little));
+    // Backward: call at 6 to 0: rel = 0 - 11.
+    try patchRelativeJump(&buf, 6, 0);
+    try testing.expectEqual(@as(i32, -11), std.mem.readInt(i32, buf[7..11], .little));
+    try testing.expectEqualSlices(u8, &.{ 0xF5, 0xFF, 0xFF, 0xFF }, buf[7..11]);
+    // Opcodes are untouched.
+    try testing.expectEqual(@as(u8, 0xE9), buf[0]);
+    try testing.expectEqual(@as(u8, 0xE8), buf[6]);
+    // An instruction that does not fit is refused.
+    try testing.expectError(error.PatchOffsetOutOfBounds, patchRelativeJump(buf[0..8], 4, 0));
+}
+
+test "patchRelativeJump patches aarch64 imm26" {
+    if (cpu.Arch.current() != .aarch64) return error.SkipZigTest;
+    var buf align(4) = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, buf[0..4], 0x14000000, .little); // B #0
+    try patchRelativeJump(&buf, 0, 12);
+    try testing.expectEqual(@as(u32, 0x14000003), std.mem.readInt(u32, buf[0..4], .little));
+    std.mem.writeInt(u32, buf[8..12], 0x94000000, .little); // BL #0
+    try patchRelativeJump(&buf, 8, 0);
+    try testing.expectEqual(@as(u32, 0x97FFFFFE), std.mem.readInt(u32, buf[8..12], .little));
+}
+
+test "jit emits template code and rebases relocation offsets" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const reloc = [_]code_blocks.RelocationEntry{code_blocks.RelocationEntry.init(.literal, .absolute_cell, 10)};
+    const code = [_]u8{ 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0 };
+    f.install(.jit_prolog, &reloc, &code);
+    f.install(.jit_epilog, &.{}, "E");
+
+    var j = Jit.init(f.vm, layouts.false_object);
+    j.registerRoot();
+    defer j.deinit();
+    try testing.expectEqual(@as(i64, 1), f.vm.current_jit_count);
+
+    try j.emit(.prolog);
+    try j.emit(.prolog);
+    try testing.expectEqual(@as(usize, 20), j.codeSize());
+    try testing.expectEqualSlices(u8, &(code ++ code), j.code.items);
+    const entries = relocEntries(&j);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqual(@as(u24, 10), entries[0].getOffset());
+    try testing.expectEqual(@as(u24, 20), entries[1].getOffset());
+    try testing.expectEqual(code_blocks.RelocationType.literal, entries[1].getType());
+    try testing.expectEqual(code_blocks.RelocationClass.absolute_cell, entries[1].getClass());
+
+    // A template without relocation info adds code only.
+    try j.emit(.epilog);
+    try testing.expectEqual(@as(usize, 21), j.codeSize());
+    try testing.expectEqual(@as(usize, 2), relocEntries(&j).len);
+
+    // An uninstalled template and a malformed (1-element) template emit nothing.
+    try j.emit(.return_template);
+    const short = f.array(&.{layouts.false_object});
+    try j.emitRaw(short);
+    try testing.expectEqual(@as(usize, 21), j.codeSize());
+}
+
+test "jit collects literals and parameters" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.install(.jit_push_literal, &.{}, "L");
+    f.install(.jit_word_call, &.{}, "C");
+
+    var j = Jit.init(f.vm, layouts.false_object);
+    j.registerRoot();
+    defer j.deinit();
+
+    try j.push(layouts.tagFixnum(7));
+    try j.emitWithLiteral(.word_call, layouts.tagFixnum(8));
+    try j.emitWithParameter(.word_call, layouts.tagFixnum(9));
+    try j.parameter(layouts.tagFixnum(10));
+    try j.literal(layouts.tagFixnum(11));
+    try j.appendLiterals(f.array(&.{ layouts.tagFixnum(12), layouts.tagFixnum(13) }));
+    try j.appendParameters(f.array(&.{layouts.tagFixnum(14)}));
+    try j.appendLiterals(layouts.false_object);
+    try j.appendParameters(layouts.false_object);
+
+    try testing.expectEqualSlices(u8, "LCC", j.code.items);
+    try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(7), layouts.tagFixnum(8), layouts.tagFixnum(11), layouts.tagFixnum(12), layouts.tagFixnum(13) }, ts.items(&j.literals));
+    try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(9), layouts.tagFixnum(10), layouts.tagFixnum(14) }, ts.items(&j.parameters));
+
+    // Growth past the initial capacity of 10 keeps every element.
+    for (0..25) |i| try j.literal(layouts.tagFixnum(@intCast(100 + i)));
+    const lits = ts.items(&j.literals);
+    try testing.expectEqual(@as(usize, 30), lits.len);
+    try testing.expectEqual(layouts.tagFixnum(124), lits[29]);
+}
+
+test "jit subprimitive emission: parameters, literals, main code and continuations" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.install(.jit_epilog, &.{}, "E");
+
+    const params = f.array(&.{ layouts.tagFixnum(1), layouts.tagFixnum(2) });
+    const lits = f.array(&.{layouts.tagFixnum(3)});
+    const main_t = f.template(&.{}, "M");
+    const call_t = f.template(&.{}, "c");
+    const tail_t = f.template(&.{}, "t");
+    const five = f.word(f.array(&.{ params, lits, main_t, call_t, tail_t }));
+    const three = f.word(f.array(&.{ layouts.false_object, layouts.false_object, main_t }));
+    const plain = f.word(layouts.false_object);
+    const too_short = f.word(f.array(&.{ layouts.false_object, layouts.false_object }));
+
+    {
+        var j = Jit.init(f.vm, layouts.false_object);
+        j.registerRoot();
+        defer j.deinit();
+        try testing.expect(!try j.emitSubprimitive(five, false, true));
+        try testing.expectEqualSlices(u8, "Mc", j.code.items);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(1), layouts.tagFixnum(2) }, ts.items(&j.parameters));
+        try testing.expectEqualSlices(Cell, &.{layouts.tagFixnum(3)}, ts.items(&j.literals));
+    }
+    {
+        // Tail call with a stack frame: epilog between main code and tail continuation.
+        var j = Jit.init(f.vm, layouts.false_object);
+        j.registerRoot();
+        defer j.deinit();
+        try testing.expect(try j.emitSubprimitive(five, true, true));
+        try testing.expectEqualSlices(u8, "MEt", j.code.items);
+    }
+    {
+        // Tail call without a stack frame: no epilog.
+        var j = Jit.init(f.vm, layouts.false_object);
+        j.registerRoot();
+        defer j.deinit();
+        try testing.expect(try j.emitSubprimitive(five, true, false));
+        try testing.expectEqualSlices(u8, "Mt", j.code.items);
+    }
+    {
+        // 3-element templates have no continuations; other words emit nothing.
+        var j = Jit.init(f.vm, layouts.false_object);
+        j.registerRoot();
+        defer j.deinit();
+        try testing.expect(!try j.emitSubprimitive(three, true, true));
+        try testing.expectEqualSlices(u8, "M", j.code.items);
+        try testing.expect(!try j.emitSubprimitive(plain, true, true));
+        try testing.expect(!try j.emitSubprimitive(too_short, false, true));
+        try testing.expectEqualSlices(u8, "M", j.code.items);
+        try testing.expectEqual(@as(usize, 0), ts.items(&j.literals).len);
+    }
+}
+
+test "jit source position tracking across templates" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.install(.jit_prolog, &.{}, "PPP");
+
+    var j = Jit.init(f.vm, layouts.false_object);
+    j.registerRoot();
+    defer j.deinit();
+
+    // Not computing: setPosition is ignored.
+    j.setPosition(5);
+    try testing.expectEqual(@as(i64, 0), j.getPosition());
+
+    // Offset 4 lies inside the second 3-byte template: position after it.
+    j.computePosition(4);
+    j.setPosition(0);
+    try j.emit(.prolog);
+    try testing.expect(j.computing_offset_p);
+    j.setPosition(1);
+    try j.emit(.prolog);
+    try testing.expect(!j.computing_offset_p);
+    try testing.expectEqual(@as(i64, 2), j.getPosition());
+
+    // Offset 0 means "before the first template".
+    j.computePosition(0);
+    j.setPosition(3);
+    try j.emit(.prolog);
+    try testing.expectEqual(@as(i64, 2), j.getPosition());
+    try testing.expect(!j.computing_offset_p);
+}
+
+test "jit labels: forward references are patched and reported as fixup triples" {
+    // NOTE: Jit.emitJumpToLabel / emitCallToLabel are never called by the VM
+    // and cannot be: their helpers emitJumpDirect, emitCallDirect,
+    // emitJumpPlaceholder and emitCallPlaceholder switch on cpu.Arch without
+    // a `.x86` arm, so referencing them is a compile error ("switch must
+    // handle all possibilities"). This test drives the label manager through
+    // the Jit's own label API and hand-written placeholders instead.
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.install(.jit_prolog, &.{}, "PPPP");
+
+    var j = Jit.init(f.vm, layouts.false_object);
+    j.registerRoot();
+    defer j.deinit();
+
+    const back = try j.makeLabel();
+    const fwd = try j.makeLabel();
+    try j.defineLabel(back); // position 0
+    try testing.expect(j.label_manager.isLabelDefined(back));
+    try testing.expect(!j.label_manager.isLabelDefined(fwd));
+    try j.emit(.prolog); // 0..4
+
+    const insn_size: usize = if (cpu.Arch.current() == .aarch64) 4 else 5;
+    const jump_at = j.codeSize();
+    switch (cpu.Arch.current()) {
+        .x86_64 => try j.code.appendSlice(f.vm.allocator, &.{ 0xE9, 0, 0, 0, 0 }),
+        .aarch64 => try j.code.appendSlice(f.vm.allocator, &.{ 0, 0, 0, 0x14 }),
+        else => return error.SkipZigTest,
+    }
+    try j.label_manager.addForwardRef(fwd, jump_at, .relative);
+    const call_at = j.codeSize();
+    switch (cpu.Arch.current()) {
+        .x86_64 => try j.code.appendSlice(f.vm.allocator, &.{ 0xE8, 0, 0, 0, 0 }),
+        .aarch64 => try j.code.appendSlice(f.vm.allocator, &.{ 0, 0, 0, 0x94 }),
+        else => unreachable,
+    }
+    try j.label_manager.addForwardRef(fwd, call_at, .relative);
+    try j.emit(.prolog);
+    try j.defineLabel(fwd);
+    const end = j.codeSize();
+    try testing.expectEqual(@as(usize, 8 + 2 * insn_size), end);
+    try testing.expectEqual(@as(?usize, end), j.label_manager.getLabelPosition(fwd));
+
+    var fixups = try j.fixupLabels();
+    defer fixups.deinit(f.vm.allocator);
+    // Two forward references, three cells each: class, patch offset, target.
+    try testing.expectEqualSlices(Cell, &.{
+        layouts.tagFixnum(@intFromEnum(code_blocks.RelocationClass.relative)),
+        layouts.tagFixnum(@intCast(jump_at)),
+        layouts.tagFixnum(@intCast(end)),
+        layouts.tagFixnum(@intFromEnum(code_blocks.RelocationClass.relative)),
+        layouts.tagFixnum(@intCast(call_at)),
+        layouts.tagFixnum(@intCast(end)),
+    }, fixups.items);
+
+    const c = j.code.items;
+    switch (cpu.Arch.current()) {
+        .x86_64 => {
+            try testing.expectEqual(@as(u8, 0xE9), c[jump_at]);
+            try testing.expectEqual(@as(i32, @intCast(end - (jump_at + 5))), std.mem.readInt(i32, c[jump_at + 1 ..][0..4], .little));
+            try testing.expectEqual(@as(u8, 0xE8), c[call_at]);
+            try testing.expectEqual(@as(i32, @intCast(end - (call_at + 5))), std.mem.readInt(i32, c[call_at + 1 ..][0..4], .little));
+        },
+        .aarch64 => {
+            try testing.expectEqual(@as(u32, 0x14000000 | @as(u32, @intCast((end - jump_at) / 4))), std.mem.readInt(u32, c[jump_at..][0..4], .little));
+            try testing.expectEqual(@as(u32, 0x94000000 | @as(u32, @intCast((end - call_at) / 4))), std.mem.readInt(u32, c[call_at..][0..4], .little));
+        },
+        else => unreachable,
+    }
+
+    // Unknown label ids are refused, and an undefined label fails the fixup.
+    try testing.expectError(error.InvalidLabelId, j.label_manager.addForwardRef(99, 0, .relative));
+    try testing.expectError(error.InvalidLabelId, j.label_manager.defineLabel(99, 0));
+    try testing.expect(!j.label_manager.isLabelDefined(99));
+    try testing.expectEqual(@as(?usize, null), j.label_manager.getLabelPosition(99));
+    const dangling = try j.makeLabel();
+    try j.label_manager.addForwardRef(dangling, jump_at, .relative);
+    try testing.expectError(error.UndefinedLabel, j.fixupLabels());
+    j.label_manager.clear();
+    try testing.expectEqual(@as(usize, 0), j.label_manager.labels.items.len);
+    try testing.expectEqual(@as(usize, 0), j.label_manager.forward_refs.items.len);
+}
+
+test "jit toCodeBlock lays out the block and defers relocation to the uninitialized map" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    // mov rax, imm64 with a literal relocation on the immediate.
+    const reloc = [_]code_blocks.RelocationEntry{code_blocks.RelocationEntry.init(.literal, .absolute_cell, 10)};
+    const code = [_]u8{ 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0 };
+    f.install(.jit_push_literal, &reloc, &code);
+
+    const owner = f.quotation(&.{});
+    const lit = layouts.tagFixnum(77);
+    var j = Jit.init(f.vm, owner);
+    j.registerRoot();
+    defer j.deinit();
+    try j.push(lit);
+    try j.parameter(layouts.tagFixnum(5));
+
+    const block = (try j.toCodeBlock(.optimized, 48)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(code_blocks.CodeBlockType.optimized, block.blockType());
+    try testing.expectEqual(@as(Cell, 48), block.stackFrameSize());
+    try testing.expectEqual(owner, block.owner);
+    try testing.expect(f.inCodeHeap(@intFromPtr(block)));
+    // 10 code bytes + padding + 4 bytes of GC info, then the header, all 16-aligned.
+    try testing.expectEqual(@as(usize, 16), j.codeSize());
+    try testing.expectEqual(layouts.alignCell(@sizeOf(code_blocks.CodeBlock) + 16, layouts.data_alignment), block.size());
+    try testing.expectEqualSlices(u8, &code, block.codeStart()[0..10]);
+    try testing.expectEqualSlices(Cell, &.{layouts.tagFixnum(5)}, ts.arrayItems(block.parameters));
+    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&reloc), ts.byteArrayItems(block.relocation));
+
+    // Not yet relocated: the immediate is still zero and the block is pending.
+    try testing.expect(f.code_heap.isBlockUninitialized(block));
+    try testing.expectEqual(@as(Cell, 0), std.mem.readInt(Cell, block.codeStart()[2..10], .little));
+    try testing.expectEqual(lit, ts.arrayItems(f.code_heap.uninitialized_blocks.get(@intFromPtr(block)).?)[0]);
+
+    f.vm.initializeCodeBlockFromMap(block);
+    try testing.expect(!f.code_heap.isBlockUninitialized(block));
+    try testing.expectEqual(lit, std.mem.readInt(Cell, block.codeStart()[2..10], .little));
+    f.code_heap.flushPending();
+    try testing.expectEqual(block, f.code_heap.codeBlockForAddress(block.entryPoint() + 3).?);
+}
+
+/// Installs one-byte marker templates so a compiled quotation's code reads as
+/// a string of template letters.
+fn installMarkers(f: *ts.Fixture) void {
+    f.install(.jit_safepoint, &.{}, "S");
+    f.install(.jit_prolog, &.{}, "P");
+    f.install(.jit_epilog, &.{}, "E");
+    f.install(.jit_return, &.{}, "R");
+    f.install(.jit_push_literal, &.{}, "L");
+    f.install(.jit_word_call, &.{}, "C");
+    f.install(.jit_word_jump, &.{}, "J");
+    f.install(.jit_if, &.{}, "I");
+    f.install(.jit_dip, &.{}, "D");
+    f.install(.jit_2dip, &.{}, "2");
+    f.install(.jit_3dip, &.{}, "3");
+    f.install(.jit_primitive, &.{}, "M");
+    f.install(.jit_execute, &.{}, "X");
+    f.install(.pic_load, &.{}, "O");
+    f.install(.mega_lookup, &.{}, "G");
+    f.setSpecial(.jit_if_word, f.word(layouts.false_object));
+    f.setSpecial(.jit_dip_word, f.word(layouts.false_object));
+    f.setSpecial(.jit_2dip_word, f.word(layouts.false_object));
+    f.setSpecial(.jit_3dip_word, f.word(layouts.false_object));
+    f.setSpecial(.jit_primitive_word, f.word(layouts.false_object));
+    f.setSpecial(.jit_declare_word, f.word(layouts.false_object));
+    f.setSpecial(.mega_lookup_word, f.word(layouts.false_object));
+    f.setSpecial(.mega_miss_word, f.word(layouts.false_object));
+    f.setSpecial(.signal_handler_word, f.word(layouts.false_object));
+}
+
+const Compiled = struct {
+    code: []const u8,
+    literals: []const Cell,
+    parameters: []const Cell,
+};
+
+/// Runs the non-optimizing compiler over `elements` without touching the
+/// code heap or nested quotations.
+fn compileElements(f: *ts.Fixture, qj: *QuotationJit, elements: []const Cell) !Compiled {
+    const quot = f.quotation(elements);
+    qj.* = QuotationJit.init(f.vm, quot, false, false);
+    qj.registerRoot();
+    qj.initQuotation(quot);
+    try qj.iterateQuotation();
+    return .{ .code = qj.jit.code.items, .literals = ts.items(&qj.jit.literals), .parameters = ts.items(&qj.jit.parameters) };
+}
+
+test "quotation jit: literals, calls, tail jump and return" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installMarkers(&f);
+    const a = f.word(layouts.false_object);
+    const b = f.word(layouts.false_object);
+
+    {
+        // Straight-line: prolog, push, call, then a tail jump (no return).
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ layouts.tagFixnum(42), a, b });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPLCSEJ", r.code);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(42), a, b }, r.literals);
+        try testing.expectEqual(@as(usize, 0), r.parameters.len);
+        try testing.expectEqual(@as(usize, 7), qj.codeSize());
+    }
+    {
+        // No tail call: epilog then return.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{layouts.tagFixnum(1)});
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPLSER", r.code);
+    }
+    {
+        // Empty quotation.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{});
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPSER", r.code);
+    }
+    {
+        // Wrappers push the wrapped object; other objects push themselves.
+        var qj: QuotationJit = undefined;
+        const s = f.byteArray("x");
+        const r = try compileElements(&f, &qj, &.{ f.wrapper(a), s, layouts.false_object });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPLLLSER", r.code);
+        try testing.expectEqualSlices(Cell, &.{ a, s, layouts.false_object }, r.literals);
+    }
+}
+
+test "quotation jit: subprimitives and special subprimitives" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installMarkers(&f);
+    const main_t = f.template(&.{}, "m");
+    const call_t = f.template(&.{}, "c");
+    const tail_t = f.template(&.{}, "t");
+    const sub = f.word(f.array(&.{ layouts.false_object, f.array(&.{layouts.tagFixnum(9)}), main_t, call_t, tail_t }));
+    const sig = f.special(.signal_handler_word);
+
+    {
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ sub, sub });
+        defer qj.deinit();
+        // Non-tail: main + call continuation; tail: main + epilog + tail continuation.
+        try testing.expectEqualSlices(u8, "SPmcmEt", r.code);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(9), layouts.tagFixnum(9) }, r.literals);
+    }
+    {
+        // A special subprimitive means no stack frame: no prolog, no epilog.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ layouts.tagFixnum(1), sig });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "LJ", r.code);
+        try testing.expectEqual(SIGNAL_HANDLER_STACK_FRAME_SIZE, qj.wordStackFrameSize(sig));
+        try testing.expectEqual(JIT_FRAME_SIZE, qj.wordStackFrameSize(sub));
+    }
+}
+
+test "quotation jit: if, dip and declare patterns" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installMarkers(&f);
+    const w = f.word(layouts.false_object);
+    const q_multi = f.quotation(&.{ layouts.tagFixnum(1), layouts.tagFixnum(2) });
+    const q_word = f.quotation(&.{w});
+    const q_none = f.quotation(null);
+
+    {
+        // [ .. ] [ .. ] if in tail position: epilog, two quotation literals, if.
+        // A one-word quotation is referenced by its word, an array-less one by itself.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ q_multi, q_word, f.special(.jit_if_word) });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPSEI", r.code);
+        try testing.expectEqualSlices(Cell, &.{ q_multi, w }, r.literals);
+    }
+    {
+        // Not in tail position, `if` is an ordinary word call.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ q_none, q_multi, f.special(.jit_if_word), layouts.tagFixnum(3) });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPLLCLSER", r.code);
+        try testing.expectEqualSlices(Cell, &.{ q_none, q_multi, f.special(.jit_if_word), layouts.tagFixnum(3) }, r.literals);
+    }
+    {
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ q_multi, f.special(.jit_dip_word), q_multi, f.special(.jit_2dip_word), q_none, f.special(.jit_3dip_word), layouts.tagFixnum(4) });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPD23LSER", r.code);
+        try testing.expectEqualSlices(Cell, &.{ q_multi, q_multi, q_none, layouts.tagFixnum(4) }, r.literals);
+    }
+    {
+        // { ... } declare is dropped; other arrays are pushed.
+        var qj: QuotationJit = undefined;
+        const decl = f.array(&.{layouts.tagFixnum(0)});
+        const r = try compileElements(&f, &qj, &.{ decl, f.special(.jit_declare_word), decl, layouts.tagFixnum(5) });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPLLSER", r.code);
+        try testing.expectEqualSlices(Cell, &.{ decl, layouts.tagFixnum(5) }, r.literals);
+    }
+}
+
+test "quotation jit: primitive call and megamorphic lookup patterns" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    installMarkers(&f);
+    const prim = f.byteArray("\x90");
+
+    {
+        // byte-array primitive-word: parameters are the code and f, no push.
+        var qj: QuotationJit = undefined;
+        const r = try compileElements(&f, &qj, &.{ prim, f.special(.jit_primitive_word), prim });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "SPMLSER", r.code);
+        try testing.expectEqualSlices(Cell, &.{ prim, layouts.false_object }, r.parameters);
+        try testing.expectEqualSlices(Cell, &.{prim}, r.literals);
+    }
+    {
+        // methods index cache mega-lookup: no stack frame, inline lookup then
+        // the miss path (prolog, three pushes, call, epilog, execute).
+        var qj: QuotationJit = undefined;
+        const methods = f.array(&.{layouts.false_object});
+        const cache = f.array(&.{ layouts.false_object, layouts.false_object });
+        const r = try compileElements(&f, &qj, &.{ methods, layouts.tagFixnum(2), cache, f.special(.mega_lookup_word) });
+        defer qj.deinit();
+        try testing.expectEqualSlices(u8, "OGPLLLCEX", r.code);
+        try testing.expectEqualSlices(Cell, &.{ layouts.tagFixnum(-2 * @sizeOf(Cell)), cache, methods, layouts.tagFixnum(2), cache, f.special(.mega_miss_word) }, r.literals);
+    }
+}
+
+test "lazy jit compilation sets the quotation entry point once" {
+    var f: ts.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // No templates installed: the compiled code is just GC-info padding, which
+    // is enough to exercise allocation, ownership and the entry point.
+    const quot = f.quotation(&.{ layouts.tagFixnum(1), f.word(layouts.false_object) });
+    const q: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(quot));
+
+    try testing.expectEqual(@as(Cell, 0), f.vm.lazyJitCompileEntryPoint());
+    try testing.expect(!isQuotationCompiled(f.vm, q));
+
+    try testing.expectEqual(quot, lazyJitCompile(f.vm, quot));
+    try testing.expect(isQuotationCompiled(f.vm, q));
+    const block: *code_blocks.CodeBlock = @ptrFromInt(q.entry_point - @sizeOf(code_blocks.CodeBlock));
+    try testing.expectEqual(quot, block.owner);
+    try testing.expectEqual(code_blocks.CodeBlockType.unoptimized, block.blockType());
+    try testing.expectEqual(JIT_FRAME_SIZE, block.stackFrameSize());
+    try testing.expect(!f.code_heap.isBlockUninitialized(block));
+    try testing.expectEqual(@as(i64, 0), f.vm.current_jit_count);
+
+    // Already compiled: nothing new is allocated.
+    const before = f.code_heap.occupiedSpace();
+    const ep = q.entry_point;
+    try testing.expectEqual(quot, lazyJitCompile(f.vm, quot));
+    try testing.expectEqual(ep, q.entry_point);
+    try testing.expectEqual(before, f.code_heap.occupiedSpace());
+
+    // A quotation whose entry point is the lazy stub counts as not compiled.
+    const stub = f.word(layouts.false_object);
+    const stub_word: *layouts.Word = @ptrFromInt(layouts.UNTAG(stub));
+    stub_word.entry_point = 0x1000;
+    f.setSpecial(.lazy_jit_compile_word, stub);
+    try testing.expectEqual(@as(Cell, 0x1000), f.vm.lazyJitCompileEntryPoint());
+    q.entry_point = 0x1000;
+    try testing.expect(!isQuotationCompiled(f.vm, q));
+}

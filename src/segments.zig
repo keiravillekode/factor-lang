@@ -152,3 +152,95 @@ pub const Segment = struct {
         if (std.c.mprotect(hi_ptr, page_size, prot) != 0) return error.MprotectFailed;
     }
 };
+
+// --- Tests ---
+
+test "segment places one guard page below and above a page-aligned region" {
+    var seg = try Segment.init(1000, false);
+    defer seg.deinit();
+
+    try std.testing.expectEqual(page_size, seg.size);
+    try std.testing.expectEqual(seg.alloc_base + page_size, seg.start);
+    try std.testing.expectEqual(seg.start + seg.size, seg.end);
+    try std.testing.expectEqual(3 * page_size, seg.alloc_size);
+    try std.testing.expectEqual(@as(Cell, 0), seg.start % page_size);
+
+    try std.testing.expect(seg.contains(seg.start));
+    try std.testing.expect(seg.contains(seg.end - 1));
+    try std.testing.expect(!seg.contains(seg.end));
+    try std.testing.expect(!seg.contains(seg.start - 1));
+
+    try std.testing.expect(seg.isUnderflow(seg.alloc_base));
+    try std.testing.expect(seg.isUnderflow(seg.start - 1));
+    try std.testing.expect(!seg.isUnderflow(seg.start));
+    try std.testing.expect(!seg.isUnderflow(seg.alloc_base - 1));
+
+    try std.testing.expect(seg.isOverflow(seg.end));
+    try std.testing.expect(seg.isOverflow(seg.end + page_size - 1));
+    try std.testing.expect(!seg.isOverflow(seg.end + page_size));
+    try std.testing.expect(!seg.isOverflow(seg.end - 1));
+
+    // The usable region is readable and writable end to end.
+    const first: *Cell = @ptrFromInt(seg.start);
+    const last: *Cell = @ptrFromInt(seg.end - @sizeOf(Cell));
+    first.* = 0x1234;
+    last.* = 0x5678;
+    try std.testing.expectEqual(@as(Cell, 0x1234), first.*);
+    try std.testing.expectEqual(@as(Cell, 0x5678), last.*);
+}
+
+test "segment size is rounded up to whole pages" {
+    var seg = try Segment.init(page_size + 1, false);
+    defer seg.deinit();
+    try std.testing.expectEqual(2 * page_size, seg.size);
+    try std.testing.expectEqual(4 * page_size, seg.alloc_size);
+
+    var exact = try Segment.init(page_size, false);
+    defer exact.deinit();
+    try std.testing.expectEqual(page_size, exact.size);
+}
+
+test "segment with extra low guard pages reports underflow across all of them" {
+    var seg = try Segment.initWithGuardPages(page_size, false, 4);
+    defer seg.deinit();
+    try std.testing.expectEqual(4 * page_size, seg.start - seg.alloc_base);
+    try std.testing.expectEqual(6 * page_size, seg.alloc_size);
+    try std.testing.expect(seg.isUnderflow(seg.alloc_base));
+    try std.testing.expect(seg.isUnderflow(seg.alloc_base + 2 * page_size));
+    try std.testing.expect(seg.isUnderflow(seg.start - 1));
+    try std.testing.expect(!seg.isUnderflow(seg.start));
+    try std.testing.expect(seg.contains(seg.start));
+}
+
+test "segment guard pages can be unlocked and locked again" {
+    var seg = try Segment.initWithGuardPages(page_size, false, 2);
+    defer seg.deinit();
+    try seg.setBorderLocked(false);
+    try seg.setBorderLocked(true);
+    // The usable region is unaffected either way.
+    const p: *Cell = @ptrFromInt(seg.start);
+    p.* = 42;
+    try std.testing.expectEqual(@as(Cell, 42), p.*);
+}
+
+test "executable segment is writable" {
+    var seg = try Segment.init(page_size, true);
+    defer seg.deinit();
+    const bytes: [*]u8 = @ptrFromInt(seg.start);
+    bytes[0] = 0xC3;
+    bytes[seg.size - 1] = 0x90;
+    try std.testing.expectEqual(@as(u8, 0xC3), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 0x90), bytes[seg.size - 1]);
+}
+
+test "segment deinit clears every field and is idempotent" {
+    var seg = try Segment.init(page_size, false);
+    seg.deinit();
+    try std.testing.expectEqual(@as(Cell, 0), seg.start);
+    try std.testing.expectEqual(@as(Cell, 0), seg.size);
+    try std.testing.expectEqual(@as(Cell, 0), seg.end);
+    try std.testing.expectEqual(@as(Cell, 0), seg.alloc_base);
+    try std.testing.expectEqual(@as(Cell, 0), seg.alloc_size);
+    try std.testing.expect(!seg.contains(0));
+    seg.deinit();
+}

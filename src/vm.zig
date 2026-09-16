@@ -1192,3 +1192,415 @@ comptime {
     // So offsets within VMAssemblyFields matter (verified above), but
     // the offset of vm_asm within FactorVM doesn't matter for JIT
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+const gc_fixture = @import("gc_test_fixture.zig");
+const bignum_test_mod = @import("bignum.zig");
+
+fn vfx(n: Fixnum) Cell {
+    return layouts.tagFixnum(n);
+}
+
+// Bare VM with a 1 MB nursery and no collector.
+const BareVM = struct {
+    vm: *FactorVM,
+    heap: *DataHeap,
+
+    fn init() !BareVM {
+        const allocator = testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        const heap = try DataHeap.init(allocator, 1024 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        return .{ .vm = vm, .heap = heap };
+    }
+
+    fn deinit(self: *BareVM) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+};
+
+test "allotObject tags the result, aligns the size and advances the nursery" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const before = vm.vm_asm.nursery.here;
+    const tagged = vm.allotObject(.array, 24) orelse unreachable;
+    try testing.expect(layouts.hasTag(tagged, .array));
+    const addr = layouts.UNTAG(tagged);
+    try testing.expectEqual(before, addr);
+    try testing.expectEqual(@as(Cell, 0), addr % layouts.data_alignment);
+    try testing.expectEqual(before + 32, vm.vm_asm.nursery.here);
+    const obj: *const layouts.Object = @ptrFromInt(addr);
+    try testing.expectEqual(layouts.TypeTag.array, obj.getType());
+    try testing.expect(!obj.isFree());
+    try testing.expectEqual(@as(Cell, 0), obj.hashcode());
+
+    // Exactly aligned sizes do not round up; the next object follows directly.
+    const next = vm.allotObject(.byte_array, 32) orelse unreachable;
+    try testing.expectEqual(before + 32, layouts.UNTAG(next));
+    try testing.expectEqual(before + 64, vm.vm_asm.nursery.here);
+    try testing.expect(vm.vm_asm.nursery.contains(@ptrFromInt(layouts.UNTAG(next))));
+}
+
+test "allotArray, allotUninitializedArray and allotByteArray initialize their contents" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const arr = vm.allotArray(3, vfx(4)) orelse unreachable;
+    try testing.expectEqual(@as(Cell, 3), layouts.arrayCapacity(arr));
+    const a: *const layouts.Array = @ptrFromInt(layouts.UNTAG(arr));
+    try testing.expectEqualSlices(Cell, &.{ vfx(4), vfx(4), vfx(4) }, a.data()[0..3]);
+
+    const empty = vm.allotArray(0, layouts.false_object) orelse unreachable;
+    try testing.expectEqual(@as(Cell, 0), layouts.arrayCapacity(empty));
+
+    // A heap-object fill is rooted across the allocation (no GC here, but the
+    // root push/pop must balance).
+    const roots_before = vm.data_roots.items.len;
+    const filled = vm.allotArray(2, arr) orelse unreachable;
+    try testing.expectEqual(roots_before, vm.data_roots.items.len);
+    const fa: *const layouts.Array = @ptrFromInt(layouts.UNTAG(filled));
+    try testing.expectEqualSlices(Cell, &.{ arr, arr }, fa.data()[0..2]);
+
+    const raw = vm.allotUninitializedArray(5) orelse unreachable;
+    try testing.expectEqual(@as(Cell, 5), layouts.arrayCapacity(raw));
+    try testing.expectEqual(@as(Cell, 6), layouts.slotCount(raw));
+
+    const ba = vm.allotByteArray(7);
+    try testing.expect(layouts.hasTag(ba, .byte_array));
+    const bap: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(ba));
+    try testing.expectEqual(vfx(7), bap.capacity);
+    try testing.expectEqualSlices(u8, &[_]u8{0} ** 7, bap.data()[0..7]);
+
+    const uba = vm.allotUninitializedByteArray(3);
+    const ubap: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(uba));
+    try testing.expectEqual(vfx(3), ubap.capacity);
+}
+
+test "allotAlien computes the address from its base object or displacement" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const raw = vm.allotAlien(layouts.false_object, 0xBEEF0);
+    try testing.expect(layouts.hasTag(raw, .alien));
+    const ra: *const layouts.Alien = @ptrFromInt(layouts.UNTAG(raw));
+    try testing.expectEqual(layouts.false_object, ra.base);
+    try testing.expectEqual(layouts.false_object, ra.expired);
+    try testing.expectEqual(@as(Cell, 0xBEEF0), ra.displacement);
+    try testing.expectEqual(@as(Cell, 0xBEEF0), ra.address);
+
+    const ba = vm.allotByteArray(16);
+    const displaced = vm.allotAlien(ba, 4);
+    const da: *const layouts.Alien = @ptrFromInt(layouts.UNTAG(displaced));
+    try testing.expectEqual(ba, da.base);
+    try testing.expectEqual(@as(Cell, 4), da.displacement);
+    try testing.expectEqual(layouts.UNTAG(ba) + @sizeOf(layouts.ByteArray) + 4, da.address);
+    const bap: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(ba));
+    try testing.expectEqual(@intFromPtr(bap.data()) + 4, da.address);
+}
+
+test "allotBignumFromCell and allotBignumFromSignedCell round trip through the bignum API" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    for ([_]Cell{ 1, 0xFFFF_FFFF, @as(Cell, 1) << 62, std.math.maxInt(u64) }) |n| {
+        const tagged = vm.allotBignumFromCell(n);
+        try testing.expect(layouts.hasTag(tagged, .bignum));
+        const bn: *const bignum_test_mod.Bignum = @ptrFromInt(layouts.UNTAG(tagged));
+        try testing.expect(!bn.isNegative());
+        try testing.expectEqual(n, bignum_test_mod.toUint64(bn));
+    }
+
+    for ([_]i64{ -1, -0xFFFF_FFFF, -(@as(i64, 1) << 62), std.math.minInt(i64) + 1, std.math.minInt(i64) }) |n| {
+        const tagged = vm.allotBignumFromSignedCell(n);
+        try testing.expect(layouts.hasTag(tagged, .bignum));
+        const bn: *const bignum_test_mod.Bignum = @ptrFromInt(layouts.UNTAG(tagged));
+        try testing.expect(bn.isNegative());
+        try testing.expectEqual(n, bignum_test_mod.toInt64(bn));
+    }
+}
+
+test "reallotArray grows with f, shrinks nursery arrays in place and roots the source" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const arr = vm.allotArray(2, vfx(1)) orelse unreachable;
+    const ap: *layouts.Array = @ptrFromInt(layouts.UNTAG(arr));
+    ap.data()[1] = vfx(2);
+
+    try testing.expectEqual(arr, vm.reallotArray(arr, 2).?);
+
+    const roots_before = vm.data_roots.items.len;
+    const grown = vm.reallotArray(arr, 4).?;
+    try testing.expectEqual(roots_before, vm.data_roots.items.len);
+    try testing.expect(grown != arr);
+    const gp: *const layouts.Array = @ptrFromInt(layouts.UNTAG(grown));
+    try testing.expectEqualSlices(Cell, &.{ vfx(1), vfx(2), layouts.false_object, layouts.false_object }, gp.data()[0..4]);
+
+    const shrunk = vm.reallotArray(grown, 1).?;
+    try testing.expectEqual(grown, shrunk);
+    try testing.expectEqual(@as(Cell, 1), layouts.arrayCapacity(shrunk));
+}
+
+test "allotObject routes objects larger than the nursery to tenured space" {
+    var f: gc_fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const vm = f.vm;
+
+    // DataHeap rounds the young generation up to deck_size; anything at least
+    // that large must bypass the nursery.
+    const big = vm.vm_asm.nursery.size + 4096;
+    if (vm.cards_array) |cards| @memset(cards, 0);
+    if (vm.decks_array) |decks| @memset(decks, 0);
+    const nursery_here = vm.vm_asm.nursery.here;
+
+    const arr = vm.allotObject(.array, big) orelse unreachable;
+    try testing.expect(layouts.hasTag(arr, .array));
+    try testing.expect(f.inTenured(arr));
+    try testing.expectEqual(nursery_here, vm.vm_asm.nursery.here);
+    const obj: *const layouts.Object = @ptrFromInt(layouts.UNTAG(arr));
+    try testing.expectEqual(layouts.TypeTag.array, obj.getType());
+
+    // A pointer-bearing large object has its whole range card-marked, since
+    // its uninitialized slots may soon hold young pointers.
+    const first_card: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% (layouts.UNTAG(arr) >> @intCast(card_bits)));
+    const last_card: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% ((layouts.UNTAG(arr) + big - 1) >> @intCast(card_bits)));
+    try testing.expectEqual(card_mark_mask, first_card.*);
+    try testing.expectEqual(card_mark_mask, last_card.*);
+
+    // Byte arrays carry no pointers and leave the cards clean.
+    const ba = vm.allotObject(.byte_array, big) orelse unreachable;
+    try testing.expect(f.inTenured(ba));
+    const ba_card: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% (layouts.UNTAG(ba) >> @intCast(card_bits)));
+    try testing.expectEqual(@as(u8, 0), ba_card.*);
+}
+
+test "writeBarrierRange marks the cards and decks covering a heap range and ignores others" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+    const heap = b.heap;
+
+    const cards = vm.cards_array.?;
+    const decks = vm.decks_array.?;
+    @memset(cards, 0);
+    @memset(decks, 0);
+
+    // Three cards starting one card into the heap.
+    const start = heap.segment.start + card_size;
+    vm.writeBarrierRange(start, 3 * card_size);
+    try testing.expectEqual(@as(u8, 0), cards[0]);
+    try testing.expectEqual(card_mark_mask, cards[1]);
+    try testing.expectEqual(card_mark_mask, cards[2]);
+    try testing.expectEqual(card_mark_mask, cards[3]);
+    try testing.expectEqual(@as(u8, 0), cards[4]);
+    try testing.expectEqual(card_mark_mask, decks[0]);
+
+    // A one-byte range still marks its card.
+    @memset(cards, 0);
+    vm.writeBarrierRange(start + 5 * card_size + 7, 1);
+    try testing.expectEqual(card_mark_mask, cards[6]);
+    try testing.expectEqual(@as(u8, 0), cards[5]);
+    try testing.expectEqual(@as(u8, 0), cards[7]);
+
+    // Zero-length and out-of-heap ranges do nothing.
+    @memset(cards, 0);
+    @memset(decks, 0);
+    vm.writeBarrierRange(start, 0);
+    var local: [64]u8 align(16) = undefined;
+    vm.writeBarrierRange(@intFromPtr(&local), local.len);
+    for (cards) |c| try testing.expectEqual(@as(u8, 0), c);
+    for (decks) |d| try testing.expectEqual(@as(u8, 0), d);
+
+    // A range running past the end of the heap is clamped, not overrun.
+    vm.writeBarrierRange(heap.segment.end - card_size, 16 * card_size);
+    try testing.expectEqual(card_mark_mask, cards[cards.len - 1]);
+}
+
+test "writeBarrierKnownHeapWithValue marks only old slots receiving young pointers" {
+    var f: gc_fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const vm = f.vm;
+    const heap = f.heap;
+
+    const old = f.tenuredArray(1, layouts.false_object);
+    const old_slot = &gc_fixture.arrayAt(old).data()[0];
+    const young = f.nurseryArray(1, vfx(1));
+    const young_slot = &gc_fixture.arrayAt(young).data()[0];
+    const card: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% (@intFromPtr(old_slot) >> @intCast(card_bits)));
+    const deck: *u8 = @ptrFromInt(vm.vm_asm.decks_offset +% (@intFromPtr(old_slot) >> @intCast(deck_bits)));
+    const young_card: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% (@intFromPtr(young_slot) >> @intCast(card_bits)));
+
+    card.* = 0;
+    deck.* = 0;
+    vm.writeBarrierKnownHeapWithValue(old_slot, vfx(5));
+    try testing.expectEqual(@as(u8, 0), card.*);
+
+    vm.writeBarrierKnownHeapWithValue(old_slot, old);
+    try testing.expectEqual(@as(u8, 0), card.*);
+
+    vm.writeBarrierKnownHeapWithValue(old_slot, young);
+    try testing.expectEqual(card_mark_mask, card.*);
+    try testing.expectEqual(card_mark_mask, deck.*);
+
+    // Stores into nursery objects never need a barrier.
+    young_card.* = 0;
+    vm.writeBarrierKnownHeapWithValue(young_slot, old);
+    vm.writeBarrierKnownHeapWithValue(young_slot, young);
+    try testing.expectEqual(@as(u8, 0), young_card.*);
+
+    // An aging object stored into tenured space is also remembered.
+    const aging_addr = heap.allocateAging(32) orelse unreachable;
+    const aging_arr: *layouts.Array = @ptrFromInt(aging_addr);
+    aging_arr.header = @as(Cell, @intFromEnum(layouts.TypeTag.array)) << 2;
+    aging_arr.capacity = vfx(0);
+    card.* = 0;
+    vm.writeBarrierKnownHeapWithValue(old_slot, aging_addr | @intFromEnum(layouts.TypeTag.array));
+    try testing.expectEqual(card_mark_mask, card.*);
+
+    // The unconditional variants mark regardless of the value.
+    card.* = 0;
+    vm.writeBarrierKnownHeap(old_slot);
+    try testing.expectEqual(card_mark_mask, card.*);
+    card.* = 0;
+    vm.writeBarrier(old_slot);
+    try testing.expectEqual(card_mark_mask, card.*);
+    card.* = 0;
+    vm.writeBarrierWithValue(old_slot, vfx(1));
+    try testing.expectEqual(@as(u8, 0), card.*);
+    vm.writeBarrierWithValue(old_slot, old);
+    try testing.expectEqual(card_mark_mask, card.*);
+
+    // Slots outside the data heap are ignored by the checked variants.
+    var local: Cell align(16) = 0;
+    vm.writeBarrier(&local);
+    vm.writeBarrierWithValue(&local, old);
+    for (vm.cards_array.?) |_| {}
+    try testing.expectEqual(@as(Cell, 0), local);
+
+    // markAllCards floods both tables.
+    vm.markAllCards();
+    for (vm.cards_array.?) |c| try testing.expectEqual(@as(u8, 0xff), c);
+    for (vm.decks_array.?) |d| try testing.expectEqual(@as(u8, 0xff), d);
+}
+
+test "data stack push, pop, peek and replace through the VM" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const base = vm.vm_asm.ctx.datastack;
+    try testing.expectEqual(@as(Cell, 0), vm.vm_asm.ctx.datastackDepth());
+    vm.push(vfx(1));
+    vm.push(vfx(2));
+    try testing.expectEqual(base + 2 * @sizeOf(Cell), vm.vm_asm.ctx.datastack);
+    try testing.expectEqual(@as(Cell, 2), vm.vm_asm.ctx.datastackDepth());
+    try testing.expectEqual(vfx(2), vm.peek());
+    vm.replace(vfx(3));
+    try testing.expectEqual(vfx(3), vm.peek());
+    try testing.expectEqual(vfx(3), vm.pop());
+    try testing.expectEqual(vfx(1), vm.pop());
+    try testing.expectEqual(base, vm.vm_asm.ctx.datastack);
+
+    vm.vm_asm.ctx.pushRetain(vfx(9));
+    try testing.expectEqual(@as(Cell, 1), vm.vm_asm.ctx.retainstackDepth());
+    try testing.expectEqual(vfx(9), vm.vm_asm.ctx.peekRetain());
+    try testing.expectEqual(vfx(9), vm.vm_asm.ctx.popRetain());
+    try testing.expectEqual(@as(Cell, 0), vm.vm_asm.ctx.retainstackDepth());
+}
+
+test "special objects default to f, are settable and drive tagBoolean" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    for (vm.getSpecialObjects()) |slot| try testing.expectEqual(layouts.false_object, slot);
+    try testing.expectEqual(@as(usize, objects.special_object_count), vm.getSpecialObjects().len);
+
+    // With no canonical true installed, both booleans are f.
+    try testing.expectEqual(layouts.false_object, vm.tagBoolean(true));
+    try testing.expectEqual(layouts.false_object, vm.tagBoolean(false));
+
+    vm.setSpecialObject(.canonical_true, vfx(1));
+    try testing.expectEqual(vfx(1), vm.specialObject(.canonical_true));
+    try testing.expectEqual(vfx(1), vm.vm_asm.special_objects[78]);
+    try testing.expectEqual(vfx(1), vm.tagBoolean(true));
+    try testing.expectEqual(layouts.false_object, vm.tagBoolean(false));
+
+    // lazyJitCompileEntryPoint reads the word's entry point, or 0 when unset.
+    try testing.expectEqual(@as(Cell, 0), vm.lazyJitCompileEntryPoint());
+    const word_cell = vm.allotObject(.word, @sizeOf(layouts.Word)) orelse unreachable;
+    const word: *layouts.Word = @ptrFromInt(layouts.UNTAG(word_cell));
+    word.entry_point = 0x4242;
+    vm.setSpecialObject(.lazy_jit_compile_word, word_cell);
+    try testing.expectEqual(@as(Cell, 0x4242), vm.lazyJitCompileEntryPoint());
+}
+
+test "newContext and deleteContext track active contexts and recycle unused ones" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    const original = vm.vm_asm.ctx;
+    try testing.expectEqual(@as(usize, 2), vm.active_contexts.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.unused_contexts.items.len);
+    try testing.expect(original.isActive());
+
+    const extra = try vm.newContext();
+    try testing.expectEqual(@as(usize, 3), vm.active_contexts.items.len);
+    try testing.expect(extra.isActive());
+    try testing.expectEqual(@as(Cell, 0), extra.datastackDepth());
+    extra.push(vfx(7));
+    extra.context_objects[0] = vfx(8);
+
+    vm.vm_asm.ctx = extra;
+    vm.deleteContext();
+    vm.vm_asm.ctx = original;
+    try testing.expectEqual(@as(usize, 2), vm.active_contexts.items.len);
+    try testing.expectEqual(@as(usize, 1), vm.unused_contexts.items.len);
+    try testing.expect(!extra.isActive());
+
+    // The recycled context comes back reset.
+    const reused = try vm.newContext();
+    try testing.expectEqual(extra, reused);
+    try testing.expectEqual(@as(usize, 0), vm.unused_contexts.items.len);
+    try testing.expectEqual(@as(usize, 3), vm.active_contexts.items.len);
+    try testing.expect(reused.isActive());
+    try testing.expectEqual(@as(Cell, 0), reused.datastackDepth());
+    try testing.expectEqual(layouts.false_object, reused.context_objects[0]);
+
+    // Park it in the unused list again so vm.deinit frees it.
+    vm.vm_asm.ctx = reused;
+    vm.deleteContext();
+    vm.vm_asm.ctx = original;
+    try testing.expectEqual(@as(usize, 1), vm.unused_contexts.items.len);
+}
+
+test "ensureNurserySpace reports whether an allocation fits without a collector" {
+    var b = try BareVM.init();
+    defer b.deinit();
+    const vm = b.vm;
+
+    try testing.expect(vm.ensureNurserySpace(64));
+    const remaining = vm.vm_asm.nursery.end - vm.vm_asm.nursery.here;
+    try testing.expect(vm.ensureNurserySpace(remaining));
+    // With vm.gc null, minorGc is a no-op and the answer stays false.
+    try testing.expect(!vm.ensureNurserySpace(remaining + 16));
+    try testing.expect(vm.gc == null);
+}

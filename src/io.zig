@@ -305,3 +305,119 @@ pub fn initIO(vm: *vm_mod.FactorVM) !void {
 pub fn deinitIO(vm: *vm_mod.FactorVM) void {
     deinitSignalPipe(vm);
 }
+
+// --- Tests ---
+
+const TestFile = struct {
+    tmp: std.testing.TmpDir,
+    dir_path: [:0]u8,
+    path: [:0]u8,
+
+    fn init(name: []const u8) !TestFile {
+        const testing = std.testing;
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const dir_path = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        errdefer testing.allocator.free(dir_path);
+        const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/{s}", .{ dir_path, name }, 0);
+        return .{ .tmp = tmp, .dir_path = dir_path, .path = path };
+    }
+
+    fn deinit(self: *TestFile) void {
+        std.testing.allocator.free(self.path);
+        std.testing.allocator.free(self.dir_path);
+        self.tmp.cleanup();
+    }
+};
+
+test "safe file functions write, seek, tell and read back" {
+    const testing = std.testing;
+    var tf = try TestFile.init("io-test.bin");
+    defer tf.deinit();
+
+    const f = try safeFopen(tf.path.ptr, "wb");
+    try testing.expectEqual(@as(usize, 5), try safeFwrite("hello", 1, 5, f));
+    try safeFputc('!', f);
+    try safeFflush(f);
+    try testing.expectEqual(@as(i64, 6), try safeFtell(f));
+    try safeFseek(f, 0, 0);
+    try testing.expectEqual(@as(i64, 0), try safeFtell(f));
+    try safeFseek(f, 0, 2);
+    try testing.expectEqual(@as(i64, 6), try safeFtell(f));
+    try safeFseek(f, -2, 1);
+    try testing.expectEqual(@as(i64, 4), try safeFtell(f));
+    try testing.expectError(error.SeekError, safeFseek(f, 0, 3));
+    try safeFclose(f);
+
+    const r = try safeFopen(tf.path.ptr, "rb");
+    var buf: [16]u8 = undefined;
+    // A short read at end of file returns the count rather than an error.
+    try testing.expectEqual(@as(usize, 6), try safeFread(@ptrCast(&buf), 1, buf.len, r));
+    try testing.expectEqualStrings("hello!", buf[0..6]);
+    try testing.expectEqual(@as(usize, 0), try safeFread(@ptrCast(&buf), 1, 4, r));
+    safeClearerr(r);
+    // Multi-byte items: 3 items of 2 bytes.
+    try safeFseek(r, 0, 0);
+    try testing.expectEqual(@as(usize, 3), try safeFread(@ptrCast(&buf), 2, 3, r));
+    try testing.expectEqualStrings("hello!", buf[0..6]);
+
+    try safeFseek(r, 1, 0);
+    for ("ello!") |expected| {
+        try testing.expectEqual(@as(i32, expected), try safeFgetc(r));
+    }
+    try testing.expectEqual(@as(i32, EOF), try safeFgetc(r));
+    try testing.expectEqual(@as(i32, EOF), try safeFgetc(r));
+    safeClearerr(r);
+    try safeFseek(r, 0, 0);
+    try testing.expectEqual(@as(i32, 'h'), try safeFgetc(r));
+    try safeFclose(r);
+}
+
+test "safeFopen reports a missing file as OpenError" {
+    var tf = try TestFile.init("does-not-exist.bin");
+    defer tf.deinit();
+    try std.testing.expectError(error.OpenError, safeFopen(tf.path.ptr, "rb"));
+}
+
+test "errno accessors round trip" {
+    setErrno(0);
+    try std.testing.expectEqual(@as(i32, 0), getErrno());
+    setErrno(42);
+    try std.testing.expectEqual(@as(i32, 42), getErrno());
+    setErrno(0);
+}
+
+test "signal pipe is created close-on-exec with a non-blocking write end" {
+    const testing = std.testing;
+    const vm = try vm_mod.FactorVM.init(testing.allocator);
+    vm.vm_asm.ctx = try vm.newContext();
+    vm.vm_asm.spare_ctx = try vm.newContext();
+    defer vm.deinit();
+
+    try testing.expectEqual(@as(i32, -1), vm.signal_pipe_input);
+    try initIO(vm);
+    try testing.expect(vm.signal_pipe_input >= 0);
+    try testing.expect(vm.signal_pipe_output >= 0);
+    try testing.expect(vm.signal_pipe_input != vm.signal_pipe_output);
+    try testing.expectEqual(layouts.tagFixnum(vm.signal_pipe_input), vm.specialObject(.signal_pipe));
+
+    try testing.expect(std.c.fcntl(vm.signal_pipe_input, F_GETFD) & FD_CLOEXEC != 0);
+    try testing.expect(std.c.fcntl(vm.signal_pipe_output, F_GETFD) & FD_CLOEXEC != 0);
+    try testing.expect(std.c.fcntl(vm.signal_pipe_output, F_GETFL) & O_NONBLOCK_C != 0);
+
+    // Bytes written to the output end arrive on the input end.
+    const msg = "sig";
+    try testing.expectEqual(@as(isize, 3), std.c.write(vm.signal_pipe_output, msg, 3));
+    var buf: [8]u8 = undefined;
+    try testing.expectEqual(@as(isize, 3), std.c.read(vm.signal_pipe_input, &buf, buf.len));
+    try testing.expectEqualStrings("sig", buf[0..3]);
+
+    const in_fd = vm.signal_pipe_input;
+    deinitIO(vm);
+    try testing.expectEqual(@as(i32, -1), vm.signal_pipe_input);
+    try testing.expectEqual(@as(i32, -1), vm.signal_pipe_output);
+    // The descriptor is really closed.
+    try testing.expect(std.c.fcntl(in_fd, F_GETFD) < 0);
+    // A second deinit is a no-op.
+    deinitIO(vm);
+}

@@ -437,3 +437,335 @@ test "interpreter basic literals" {
     const result = vm.pop();
     try std.testing.expectEqual(layouts.tagFixnum(42), result);
 }
+
+// --- Interpreter tests ---
+
+const InterpTestVM = struct {
+    vm: *FactorVM,
+    heap: *@import("data_heap.zig").DataHeap,
+    true_obj: Cell,
+
+    fn init() !InterpTestVM {
+        const data_heap_mod = @import("data_heap.zig");
+        const allocator = std.testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        const heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        const true_obj = layouts.tagFixnum(0x7472_7565);
+        vm.vm_asm.special_objects[@intFromEnum(objects.SpecialObject.canonical_true)] = true_obj;
+        return .{ .vm = vm, .heap = heap, .true_obj = true_obj };
+    }
+
+    fn deinit(self: *InterpTestVM) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn string(self: *InterpTestVM, text: []const u8) Cell {
+        const tagged = self.vm.allotObject(.string, @sizeOf(layouts.String) + text.len) orelse @panic("OOM");
+        const str: *layouts.String = @ptrFromInt(layouts.UNTAG(tagged));
+        str.length = layouts.tagFixnum(@intCast(text.len));
+        str.aux = layouts.false_object;
+        str.hashcode_field = layouts.tagFixnum(0);
+        @memcpy(str.data()[0..text.len], text);
+        return tagged;
+    }
+
+    fn word(self: *InterpTestVM, name: []const u8, def: Cell) Cell {
+        const name_cell = self.string(name);
+        const tagged = self.vm.allotObject(.word, @sizeOf(layouts.Word)) orelse @panic("OOM");
+        const w: *layouts.Word = @ptrFromInt(layouts.UNTAG(tagged));
+        w.hashcode_field = layouts.tagFixnum(0);
+        w.name = name_cell;
+        w.vocabulary = layouts.false_object;
+        w.def = def;
+        w.props = layouts.false_object;
+        w.pic_def = layouts.false_object;
+        w.pic_tail_def = layouts.false_object;
+        w.subprimitive = layouts.false_object;
+        w.entry_point = 0;
+        return tagged;
+    }
+
+    fn builtin(self: *InterpTestVM, name: []const u8) Cell {
+        return self.word(name, layouts.false_object);
+    }
+
+    fn quotation(self: *InterpTestVM, elems: []const Cell) Cell {
+        const arr = self.vm.allotArray(elems.len, layouts.false_object) orelse @panic("OOM");
+        const a: *layouts.Array = @ptrFromInt(layouts.UNTAG(arr));
+        @memcpy(a.data()[0..elems.len], elems);
+        const tagged = self.vm.allotObject(.quotation, @sizeOf(layouts.Quotation)) orelse @panic("OOM");
+        const q: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(tagged));
+        q.array = arr;
+        q.cached_effect = layouts.false_object;
+        q.cache_counter = layouts.false_object;
+        q.entry_point = 0;
+        return tagged;
+    }
+
+    fn wrapper(self: *InterpTestVM, obj: Cell) Cell {
+        const tagged = self.vm.allotObject(.wrapper, @sizeOf(layouts.Wrapper)) orelse @panic("OOM");
+        const w: *layouts.Wrapper = @ptrFromInt(layouts.UNTAG(tagged));
+        w.object = obj;
+        return tagged;
+    }
+
+    fn run(self: *InterpTestVM, quot: Cell) ExecutionError!void {
+        var interp = Interpreter.init(self.vm);
+        try interp.executeQuotation(quot);
+        std.debug.assert(interp.recursion_depth == 0);
+    }
+
+    fn depth(self: *InterpTestVM) Cell {
+        return self.vm.vm_asm.ctx.datastackDepth();
+    }
+
+    fn reset(self: *InterpTestVM) void {
+        self.vm.vm_asm.ctx.resetDatastack();
+    }
+
+    /// Run `[ inputs... word ]` and check the stack equals `outputs`.
+    fn expectStack(self: *InterpTestVM, word_name: []const u8, inputs: []const Cell, outputs: []const Cell) !void {
+        self.reset();
+        for (inputs) |in| self.vm.push(in);
+        try self.run(self.quotation(&.{self.builtin(word_name)}));
+        try std.testing.expectEqual(outputs.len, self.depth());
+        var i = outputs.len;
+        while (i > 0) {
+            i -= 1;
+            try std.testing.expectEqual(outputs[i], self.vm.pop());
+        }
+    }
+};
+
+const fx = layouts.tagFixnum;
+
+test "interpreter pushes literals, wrapped objects and nested quotations" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const s = t.string("s");
+    const inner = t.quotation(&.{fx(2)});
+    const w = t.builtin("dup");
+    const quot = t.quotation(&.{ fx(1), s, inner, t.wrapper(w), layouts.false_object });
+    try t.run(quot);
+    try std.testing.expectEqual(@as(Cell, 5), t.depth());
+    try std.testing.expectEqual(layouts.false_object, t.vm.pop());
+    // A wrapper pushes the wrapped word instead of executing it.
+    try std.testing.expectEqual(w, t.vm.pop());
+    try std.testing.expectEqual(inner, t.vm.pop());
+    try std.testing.expectEqual(s, t.vm.pop());
+    try std.testing.expectEqual(fx(1), t.vm.pop());
+}
+
+test "interpreter stack shufflers" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const a = fx(1);
+    const b = fx(2);
+    const c = fx(3);
+    try t.expectStack("swap", &.{ a, b }, &.{ b, a });
+    try t.expectStack("dup", &.{a}, &.{ a, a });
+    try t.expectStack("drop", &.{ a, b }, &.{a});
+    try t.expectStack("over", &.{ a, b }, &.{ a, b, a });
+    try t.expectStack("rot", &.{ a, b, c }, &.{ b, c, a });
+    try t.expectStack("-rot", &.{ a, b, c }, &.{ c, a, b });
+    try t.expectStack("2dup", &.{ a, b }, &.{ a, b, a, b });
+    try t.expectStack("2drop", &.{ a, b, c }, &.{a});
+    try t.expectStack("3dup", &.{ a, b, c }, &.{ a, b, c, a, b, c });
+    try t.expectStack("pick", &.{ a, b, c }, &.{ a, b, c, a });
+    try t.expectStack("nip", &.{ a, b }, &.{b});
+    try t.expectStack("dupd", &.{ a, b }, &.{ a, a, b });
+    try t.expectStack("swapd", &.{ a, b, c }, &.{ b, a, c });
+}
+
+test "interpreter combinators call dip keep if and ?" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const plus = t.builtin("fixnum+");
+
+    try t.run(t.quotation(&.{ fx(1), t.quotation(&.{fx(2)}), t.builtin("call") }));
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+    try std.testing.expectEqual(fx(1), t.vm.pop());
+
+    t.reset();
+    try t.run(t.quotation(&.{ fx(1), fx(2), t.quotation(&.{ fx(10), plus }), t.builtin("dip") }));
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+    try std.testing.expectEqual(fx(11), t.vm.pop());
+
+    t.reset();
+    try t.run(t.quotation(&.{ fx(5), t.quotation(&.{ fx(1), plus }), t.builtin("keep") }));
+    try std.testing.expectEqual(fx(5), t.vm.pop());
+    try std.testing.expectEqual(fx(6), t.vm.pop());
+
+    const yes = t.quotation(&.{fx(1)});
+    const no = t.quotation(&.{fx(2)});
+    t.reset();
+    try t.run(t.quotation(&.{ t.true_obj, yes, no, t.builtin("if") }));
+    try std.testing.expectEqual(fx(1), t.vm.pop());
+    t.reset();
+    try t.run(t.quotation(&.{ layouts.false_object, yes, no, t.builtin("if") }));
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+    // Any non-f value counts as true.
+    t.reset();
+    try t.run(t.quotation(&.{ fx(0), yes, no, t.builtin("if") }));
+    try std.testing.expectEqual(fx(1), t.vm.pop());
+
+    t.reset();
+    try t.run(t.quotation(&.{ t.true_obj, fx(1), fx(2), t.builtin("?") }));
+    try std.testing.expectEqual(fx(1), t.vm.pop());
+    t.reset();
+    try t.run(t.quotation(&.{ layouts.false_object, fx(1), fx(2), t.builtin("?") }));
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+    try std.testing.expectEqual(@as(Cell, 0), t.depth());
+}
+
+test "interpreter fixnum arithmetic bit operations and comparisons" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const T = t.true_obj;
+    const F = layouts.false_object;
+    try t.expectStack("fixnum+", &.{ fx(3), fx(4) }, &.{fx(7)});
+    try t.expectStack("fixnum+fast", &.{ fx(3), fx(4) }, &.{fx(7)});
+    try t.expectStack("fixnum-", &.{ fx(3), fx(4) }, &.{fx(-1)});
+    try t.expectStack("fixnum-fast", &.{ fx(-3), fx(-4) }, &.{fx(1)});
+    try t.expectStack("fixnum*", &.{ fx(-3), fx(4) }, &.{fx(-12)});
+    try t.expectStack("fixnum*fast", &.{ fx(6), fx(7) }, &.{fx(42)});
+    try t.expectStack("fixnum-bitand", &.{ fx(0b1100), fx(0b1010) }, &.{fx(0b1000)});
+    try t.expectStack("fixnum-bitor", &.{ fx(0b1100), fx(0b1010) }, &.{fx(0b1110)});
+    try t.expectStack("fixnum-bitxor", &.{ fx(0b1100), fx(0b1010) }, &.{fx(0b0110)});
+    try t.expectStack("fixnum-bitnot", &.{fx(0)}, &.{fx(-1)});
+    try t.expectStack("fixnum-shift", &.{ fx(1), fx(4) }, &.{fx(16)});
+    try t.expectStack("fixnum-shift", &.{ fx(16), fx(-2) }, &.{fx(4)});
+    try t.expectStack("fixnum-shift", &.{ fx(-16), fx(-2) }, &.{fx(-4)});
+    try t.expectStack("fixnum-shift", &.{ fx(-1), fx(-100) }, &.{fx(-1)});
+    try t.expectStack("fixnum-shift", &.{ fx(5), fx(0) }, &.{fx(5)});
+    try t.expectStack("fixnum<", &.{ fx(1), fx(2) }, &.{T});
+    try t.expectStack("fixnum<", &.{ fx(2), fx(2) }, &.{F});
+    try t.expectStack("fixnum<=", &.{ fx(2), fx(2) }, &.{T});
+    try t.expectStack("fixnum>", &.{ fx(1), fx(2) }, &.{F});
+    try t.expectStack("fixnum>", &.{ fx(3), fx(2) }, &.{T});
+    try t.expectStack("fixnum>=", &.{ fx(-2), fx(-2) }, &.{T});
+    try t.expectStack("fixnum>=", &.{ fx(-3), fx(-2) }, &.{F});
+    try t.expectStack("both-fixnums?", &.{ fx(1), fx(2) }, &.{T});
+    const s = t.string("x");
+    try t.expectStack("both-fixnums?", &.{ fx(1), s }, &.{F});
+    try t.expectStack("eq?", &.{ s, s }, &.{T});
+    try t.expectStack("eq?", &.{ s, t.string("x") }, &.{F});
+    try t.expectStack("eq?", &.{ fx(9), fx(9) }, &.{T});
+}
+
+test "interpreter tag and length" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const arr = t.vm.allotArray(3, layouts.false_object) orelse return error.OutOfMemory;
+    const ba = t.vm.allotByteArray(5);
+    const s = t.string("abc");
+    const q = t.quotation(&.{ fx(1), fx(2) });
+    try t.expectStack("tag", &.{fx(1)}, &.{fx(@intFromEnum(layouts.TypeTag.fixnum))});
+    try t.expectStack("tag", &.{layouts.false_object}, &.{fx(@intFromEnum(layouts.TypeTag.f))});
+    try t.expectStack("tag", &.{arr}, &.{fx(@intFromEnum(layouts.TypeTag.array))});
+    try t.expectStack("tag", &.{s}, &.{fx(@intFromEnum(layouts.TypeTag.string))});
+    try t.expectStack("length", &.{arr}, &.{fx(3)});
+    try t.expectStack("length", &.{ba}, &.{fx(5)});
+    try t.expectStack("length", &.{s}, &.{fx(3)});
+    try t.expectStack("length", &.{q}, &.{fx(2)});
+    try t.expectStack("length", &.{fx(1)}, &.{fx(0)});
+}
+
+test "interpreter runs word definitions and reports undefined words" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const double = t.word("double", t.quotation(&.{ t.builtin("dup"), t.builtin("fixnum+") }));
+    try t.run(t.quotation(&.{ fx(21), double }));
+    try std.testing.expectEqual(fx(42), t.vm.pop());
+
+    // Words calling words.
+    const quadruple = t.word("quadruple", t.quotation(&.{ double, double }));
+    try t.run(t.quotation(&.{ fx(3), quadruple }));
+    try std.testing.expectEqual(fx(12), t.vm.pop());
+
+    const undefined_word = t.word("mystery", layouts.false_object);
+    try std.testing.expectError(ExecutionError.UndefinedWord, t.run(t.quotation(&.{undefined_word})));
+    try std.testing.expectError(ExecutionError.InvalidQuotation, t.run(fx(5)));
+    try std.testing.expectError(ExecutionError.InvalidQuotation, t.run(t.string("not a quotation")));
+
+    // Over-long quotations are rejected before execution.
+    const long_arr = t.vm.allotArray(1001, fx(0)) orelse return error.OutOfMemory;
+    const long_quot = t.vm.allotObject(.quotation, @sizeOf(layouts.Quotation)) orelse return error.OutOfMemory;
+    const lq: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(long_quot));
+    lq.array = long_arr;
+    lq.cached_effect = layouts.false_object;
+    lq.cache_counter = layouts.false_object;
+    lq.entry_point = 0;
+    try std.testing.expectError(ExecutionError.InvalidQuotation, t.run(long_quot));
+    try std.testing.expectEqual(@as(Cell, 0), t.depth());
+}
+
+test "interpreter public entry points call execute if dip and keep" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    var interp = Interpreter.init(t.vm);
+    const plus = t.builtin("fixnum+");
+
+    t.vm.push(t.quotation(&.{fx(7)}));
+    try interp.call();
+    try std.testing.expectEqual(fx(7), t.vm.pop());
+
+    t.vm.push(fx(20));
+    t.vm.push(t.word("inc", t.quotation(&.{ fx(1), plus })));
+    try interp.execute();
+    try std.testing.expectEqual(fx(21), t.vm.pop());
+
+    t.vm.push(layouts.false_object);
+    t.vm.push(t.quotation(&.{fx(1)}));
+    t.vm.push(t.quotation(&.{fx(2)}));
+    try interp.ifCombinator();
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+
+    t.vm.push(fx(1));
+    t.vm.push(fx(2));
+    t.vm.push(t.quotation(&.{ fx(10), plus }));
+    try interp.dip();
+    try std.testing.expectEqual(fx(2), t.vm.pop());
+    try std.testing.expectEqual(fx(11), t.vm.pop());
+
+    t.vm.push(fx(5));
+    t.vm.push(t.quotation(&.{ fx(1), plus }));
+    try interp.keep();
+    try std.testing.expectEqual(fx(5), t.vm.pop());
+    try std.testing.expectEqual(fx(6), t.vm.pop());
+    try std.testing.expectEqual(@as(Cell, 0), interp.recursion_depth);
+    try std.testing.expectEqual(@as(Cell, 0), t.vm.vm_asm.ctx.retainstackDepth());
+}
+
+test "runFactor interprets a startup quotation without an entry point" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    // No startup quotation: nothing happens.
+    try runFactor(t.vm);
+    try std.testing.expectEqual(@as(Cell, 0), t.depth());
+
+    t.vm.setSpecialObject(.startup_quot, t.quotation(&.{ fx(3), fx(4), t.builtin("fixnum*") }));
+    try runFactor(t.vm);
+    try std.testing.expectEqual(fx(12), t.vm.pop());
+    try std.testing.expectEqual(@as(Cell, 0), t.depth());
+}
+
+test "interpreter treats a four element quotation as ordinary code unless it is a mega-cache lookup" {
+    var t = try InterpTestVM.init();
+    defer t.deinit();
+    const arr1 = t.vm.allotArray(1, layouts.false_object) orelse return error.OutOfMemory;
+    const arr2 = t.vm.allotArray(1, layouts.false_object) orelse return error.OutOfMemory;
+    // Shape [ array fixnum array word ] but the word is not the lookup word.
+    try t.run(t.quotation(&.{ arr1, fx(0), arr2, t.builtin("dup") }));
+    try std.testing.expectEqual(@as(Cell, 4), t.depth());
+    try std.testing.expectEqual(arr2, t.vm.pop());
+    try std.testing.expectEqual(arr2, t.vm.pop());
+    try std.testing.expectEqual(fx(0), t.vm.pop());
+    try std.testing.expectEqual(arr1, t.vm.pop());
+}

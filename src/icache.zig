@@ -110,3 +110,17 @@ test "icache flush pointer" {
     const addr = @intFromPtr(&data);
     flushICache(addr, data.len);
 }
+
+test "icache flush tolerates empty and unaligned ranges" {
+    // Nothing observable on x86; on ARM this exercises the cache
+    // maintenance syscall/builtin over ordinary heap memory.
+    const allocator = std.testing.allocator;
+    const buf = try allocator.alloc(u8, 4096 + 3);
+    defer allocator.free(buf);
+    @memset(buf, 0xD5);
+
+    flushICache(@intFromPtr(buf.ptr), 0);
+    flushICache(@intFromPtr(buf.ptr) + 1, 7);
+    flushICachePtr(buf.ptr, buf.len);
+    flushICache(@intFromPtr(buf.ptr) + 4096, 3);
+}

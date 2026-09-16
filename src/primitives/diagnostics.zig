@@ -946,3 +946,157 @@ pub export fn primitive_get_samples(vm_asm: *VMAssemblyFields) callconv(.c) void
 
     vm.push(samples_array);
 }
+
+// --- Tests ---
+
+const gc_fixture = @import("../gc_test_fixture.zig");
+const data_heap_mod = @import("../data_heap.zig");
+
+fn roomCells(tagged: Cell, expected_cells: usize) ![*]const Cell {
+    try std.testing.expect(layouts.hasTag(tagged, .byte_array));
+    const ba: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+    try std.testing.expectEqual(expected_cells * @sizeOf(Cell), layouts.untagFixnumUnsigned(ba.capacity));
+    return @ptrCast(@alignCast(ba.data()));
+}
+
+test "data_room reports nursery, aging, tenured and card table statistics" {
+    var f: gc_fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    _ = f.tenuredArray(4, layouts.false_object);
+
+    primitive_data_room(&f.vm.vm_asm);
+    const room = try roomCells(f.vm.pop(), 15);
+    const nursery = &f.vm.vm_asm.nursery;
+    try std.testing.expectEqual(nursery.size, room[0]);
+    try std.testing.expectEqual(nursery.size - nursery.freeBytes(), room[1]);
+    try std.testing.expectEqual(nursery.freeBytes(), room[2]);
+    try std.testing.expectEqual(room[0], room[1] + room[2]);
+    // The room byte array itself was just allotted in the nursery.
+    try std.testing.expect(room[1] >= 15 * @sizeOf(Cell));
+
+    try std.testing.expectEqual(f.heap.aging.size, room[3]);
+    try std.testing.expectEqual(f.heap.aging.usedBytes(), room[4]);
+    try std.testing.expectEqual(f.heap.aging.freeBytes(), room[5]);
+
+    try std.testing.expectEqual(f.heap.tenured.size, room[6]);
+    try std.testing.expectEqual(f.heap.tenured.size - f.heap.tenured.free_list.free_space, room[7]);
+    try std.testing.expectEqual(f.heap.tenured.free_list.free_space, room[8]);
+    try std.testing.expectEqual(f.heap.tenured.free_list.largestFreeBlock(), room[9]);
+    try std.testing.expectEqual(f.heap.tenured.free_list.free_block_count, room[10]);
+    try std.testing.expect(room[7] >= gc_fixture.arraySize(4));
+
+    try std.testing.expectEqual((f.heap.segment.size + vm_mod.card_size - 1) / vm_mod.card_size, room[11]);
+    try std.testing.expectEqual((f.heap.segment.size + vm_mod.deck_size - 1) / vm_mod.deck_size, room[12]);
+    try std.testing.expectEqual(f.gc.mark_stack.capacity * @sizeOf(Cell), room[13]);
+    try std.testing.expectEqual(@as(Cell, 0), room[14]);
+}
+
+test "room primitives push f when the collector or code heap is missing" {
+    const allocator = std.testing.allocator;
+    const vm = try FactorVM.init(allocator);
+    vm.vm_asm.ctx = try vm.newContext();
+    vm.vm_asm.spare_ctx = try vm.newContext();
+    defer vm.deinit();
+
+    primitive_data_room(&vm.vm_asm);
+    try std.testing.expectEqual(layouts.false_object, vm.pop());
+    primitive_code_room(&vm.vm_asm);
+    try std.testing.expectEqual(layouts.false_object, vm.pop());
+}
+
+test "all_instances lists every tenured object and skips free blocks" {
+    const allocator = std.testing.allocator;
+    const vm = try FactorVM.init(allocator);
+    vm.vm_asm.ctx = try vm.newContext();
+    vm.vm_asm.spare_ctx = try vm.newContext();
+    defer {
+        vm.cards_array = null;
+        vm.decks_array = null;
+        vm.deinit();
+    }
+    const heap = try data_heap_mod.DataHeap.init(allocator, 64 * 1024, 64 * 1024, 64 * 1024);
+    defer heap.deinit();
+    vm.setDataHeap(heap);
+
+    // Nothing in tenured yet: an empty array.
+    primitive_all_instances(&vm.vm_asm);
+    const empty = vm.pop();
+    try std.testing.expect(layouts.hasTag(empty, .array));
+    try std.testing.expectEqual(@as(Cell, 0), layouts.arrayCapacity(empty));
+
+    // Three hand-placed tenured objects of different types; the tenured
+    // allocator scatters them inside a 1KB page with free blocks around.
+    const Placed = struct {
+        fn object(h: *data_heap_mod.DataHeap, tag: layouts.TypeTag, size: Cell) !Cell {
+            const addr = h.allocateTenured(size) orelse return error.OutOfMemory;
+            const obj: *layouts.Object = @ptrFromInt(addr);
+            obj.initialize(tag);
+            return addr | @intFromEnum(tag);
+        }
+    };
+    const arr = try Placed.object(heap, .array, 32);
+    @as(*layouts.Array, @ptrFromInt(layouts.UNTAG(arr))).capacity = layouts.tagFixnum(2);
+    const ba = try Placed.object(heap, .byte_array, 32);
+    @as(*layouts.ByteArray, @ptrFromInt(layouts.UNTAG(ba))).capacity = layouts.tagFixnum(3);
+    const str = try Placed.object(heap, .string, 48);
+    const s: *layouts.String = @ptrFromInt(layouts.UNTAG(str));
+    s.length = layouts.tagFixnum(4);
+    s.aux = layouts.false_object;
+    s.hashcode_field = layouts.tagFixnum(0);
+
+    primitive_all_instances(&vm.vm_asm);
+    const result = vm.pop();
+    try std.testing.expect(layouts.hasTag(result, .array));
+    try std.testing.expectEqual(@as(Cell, 3), layouts.arrayCapacity(result));
+    var seen_arr = false;
+    var seen_ba = false;
+    var seen_str = false;
+    var i: Cell = 0;
+    while (i < 3) : (i += 1) {
+        const item = layouts.arrayNth(result, i);
+        if (item == arr) seen_arr = true;
+        if (item == ba) seen_ba = true;
+        if (item == str) seen_str = true;
+    }
+    try std.testing.expect(seen_arr and seen_ba and seen_str);
+    try std.testing.expect(!vm.gc_off);
+}
+
+test "dispatch_stats returns the statistics bytes and reset clears them" {
+    const allocator = std.testing.allocator;
+    const vm = try FactorVM.init(allocator);
+    vm.vm_asm.ctx = try vm.newContext();
+    vm.vm_asm.spare_ctx = try vm.newContext();
+    defer {
+        vm.cards_array = null;
+        vm.decks_array = null;
+        vm.deinit();
+    }
+    const heap = try data_heap_mod.DataHeap.init(allocator, 64 * 1024, 64 * 1024, 64 * 1024);
+    defer heap.deinit();
+    vm.setDataHeap(heap);
+
+    vm.dispatch_stats.megamorphic_cache_hits = 7;
+    vm.dispatch_stats.megamorphic_cache_misses = 8;
+    vm.dispatch_stats.pic_to_mega_transitions = 9;
+    vm.dispatch_stats.cold_call_to_ic_transitions = 10;
+    vm.dispatch_stats.ic_to_pic_transitions = 11;
+    vm.dispatch_stats.pic_tag_count = 12;
+    vm.dispatch_stats.pic_tuple_count = 13;
+
+    primitive_dispatch_stats(&vm.vm_asm);
+    const tagged = vm.pop();
+    try std.testing.expect(layouts.hasTag(tagged, .byte_array));
+    const ba: *const layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+    const size = @sizeOf(vm_mod.DispatchStatistics);
+    try std.testing.expectEqual(size, layouts.untagFixnumUnsigned(ba.capacity));
+    const expected: [*]const u8 = @ptrCast(&vm.dispatch_stats);
+    try std.testing.expectEqualSlices(u8, expected[0..size], ba.data()[0..size]);
+
+    primitive_reset_dispatch_stats(&vm.vm_asm);
+    try std.testing.expectEqual(@as(@TypeOf(vm.dispatch_stats.megamorphic_cache_hits), 0), vm.dispatch_stats.megamorphic_cache_hits);
+    try std.testing.expectEqual(@as(@TypeOf(vm.dispatch_stats.pic_tuple_count), 0), vm.dispatch_stats.pic_tuple_count);
+    const zeroed: [*]const u8 = @ptrCast(&vm.dispatch_stats);
+    for (zeroed[0..size]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+}

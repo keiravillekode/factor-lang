@@ -480,3 +480,243 @@ test "free_list 16-byte allocation" {
     try std.testing.expect(block2 != null);
     try std.testing.expect(block2.? != block.?);
 }
+
+const TestRegion = struct {
+    mem: []align(16) u8,
+    start: Cell,
+    size: Cell,
+
+    fn init(size: Cell) !TestRegion {
+        const mem = try std.testing.allocator.alignedAlloc(u8, .@"16", size);
+        return .{ .mem = mem, .start = @intFromPtr(mem.ptr), .size = size };
+    }
+
+    fn deinit(self: *TestRegion) void {
+        std.testing.allocator.free(self.mem);
+    }
+};
+
+test "free_list starts as one large block covering the region" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    try std.testing.expectEqual(region.size, fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 1), fl.freeBlockCount());
+    try std.testing.expectEqual(region.size, fl.largestFreeBlock());
+    try std.testing.expectEqual(@as(Cell, 0), fl.allocatedBytes());
+    try std.testing.expect(fl.canAllot(region.size));
+    try std.testing.expect(!fl.canAllot(region.size + 16));
+
+    const block: *const FreeBlock = @ptrFromInt(region.start);
+    try std.testing.expect(block.isFree());
+    try std.testing.expectEqual(region.size, block.size());
+    fl.validateFreeList();
+}
+
+test "free_list small allocation promotes a page into the bucket" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    // A 1024-byte page is carved from the front of the region into 64
+    // 16-byte blocks; the bucket is popped from the top, so the first
+    // allocation is the highest block of the page.
+    const a = fl.allocate(16).?;
+    try std.testing.expectEqual(region.start + 63 * 16, a);
+    try std.testing.expectEqual(@as(Cell, 64), fl.freeBlockCount());
+    try std.testing.expectEqual(region.size - 16, fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 16), fl.allocatedBytes());
+    // NOTE: the exact-fit bucket path returns the block without touching its
+    // header (still size|1); the caller writes the object header right away.
+    // The large-block and split paths clear it (see the large allocation test).
+    const allocated: *const FreeBlock = @ptrFromInt(a);
+    try std.testing.expectEqual(@as(Cell, 16), allocated.size());
+
+    const b = fl.allocate(16).?;
+    try std.testing.expectEqual(region.start + 62 * 16, b);
+    const still_free: *const FreeBlock = @ptrFromInt(region.start);
+    try std.testing.expect(still_free.isFree());
+    try std.testing.expectEqual(@as(Cell, 16), still_free.size());
+    try std.testing.expectEqual(region.size - 1024, fl.largestFreeBlock());
+    fl.validateFreeList();
+}
+
+test "free_list rounds requests up to the bucket granularity" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    const a = fl.allocate(17).?; // 32-byte bucket, 32 blocks per page
+    try std.testing.expectEqual(region.start + 31 * 32, a);
+    try std.testing.expectEqual(region.size - 32, fl.freeBytes());
+    // 48-byte bucket: page rounds up to 1056 = 22 blocks, carved after the first page.
+    const b = fl.allocate(40).?;
+    try std.testing.expectEqual(region.start + 1024 + 21 * 48, b);
+    try std.testing.expectEqual(region.size - 32 - 48, fl.freeBytes());
+    fl.validateFreeList();
+}
+
+test "free_list reuses a freed block before carving new space" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    const a = fl.allocate(48).?;
+    const before = fl.freeBytes();
+    fl.free(a, 48);
+    try std.testing.expectEqual(before + 48, fl.freeBytes());
+    const freed: *const FreeBlock = @ptrFromInt(a);
+    try std.testing.expect(freed.isFree());
+    try std.testing.expectEqual(@as(Cell, 48), freed.size());
+    // LIFO: the freed block is handed out again first.
+    try std.testing.expectEqual(a, fl.allocate(48).?);
+    try std.testing.expectEqual(before, fl.freeBytes());
+    fl.validateFreeList();
+}
+
+test "free_list large allocation splits off the remainder" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    const a = fl.allocate(2048).?;
+    try std.testing.expectEqual(region.start, a);
+    const allocated: *const FreeBlock = @ptrFromInt(a);
+    try std.testing.expect(!allocated.isFree());
+    try std.testing.expectEqual(@as(Cell, 0), allocated.header);
+    try std.testing.expectEqual(@as(Cell, 1), fl.freeBlockCount());
+    try std.testing.expectEqual(region.size - 2048, fl.freeBytes());
+    try std.testing.expectEqual(region.size - 2048, fl.largestFreeBlock());
+    const remainder: *const FreeBlock = @ptrFromInt(region.start + 2048);
+    try std.testing.expect(remainder.isFree());
+    try std.testing.expectEqual(region.size - 2048, remainder.size());
+
+    // Exact-size allocation consumes the whole block.
+    const b = fl.allocate(region.size - 2048).?;
+    try std.testing.expectEqual(region.start + 2048, b);
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 0), fl.largestFreeBlock());
+    try std.testing.expect(fl.allocate(16) == null);
+    try std.testing.expect(!fl.canAllot(16));
+    fl.validateFreeList();
+}
+
+test "free_list small remainder of a large block goes to a small bucket" {
+    var region = try TestRegion.init(1040);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+
+    const a = fl.allocate(1024).?;
+    try std.testing.expectEqual(region.start, a);
+    try std.testing.expectEqual(@as(Cell, 1), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 16), fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 16), fl.largestFreeBlock());
+    // canAllot needs at least a page-sized block, so 16 free bytes are not enough...
+    try std.testing.expect(!fl.canAllot(16));
+    // ...but a direct 16-byte allocation still succeeds via the bucket.
+    try std.testing.expectEqual(region.start + 1024, fl.allocate(16).?);
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+    fl.validateFreeList();
+}
+
+test "free_list remainder below the granularity is dropped" {
+    var region = try TestRegion.init(1032);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+    try std.testing.expectEqual(region.start, fl.allocate(1024).?);
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+    try std.testing.expect(fl.allocate(16) == null);
+}
+
+test "free_list initForImageLoad and initialFreeList start after the occupied prefix" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.initForImageLoad(std.testing.allocator, region.start, region.size, 4096);
+    defer fl.deinit();
+    try std.testing.expectEqual(region.size - 4096, fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 4096), fl.allocatedBytes());
+    const block: *const FreeBlock = @ptrFromInt(region.start + 4096);
+    try std.testing.expect(block.isFree());
+    try std.testing.expectEqual(region.size - 4096, block.size());
+
+    fl.reset();
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 0), fl.largestFreeBlock());
+
+    fl.initialFreeList(2048);
+    try std.testing.expectEqual(region.size - 2048, fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 1), fl.freeBlockCount());
+    const block2: *const FreeBlock = @ptrFromInt(region.start + 2048);
+    try std.testing.expectEqual(region.size - 2048, block2.size());
+
+    // Fully occupied: nothing is free.
+    fl.initialFreeList(region.size);
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+    fl.validateFreeList();
+}
+
+test "free_list unsorted adds are sorted for best-fit allocation" {
+    var region = try TestRegion.init(0x10000);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+    fl.reset();
+    fl.addFreeBlockUnsorted(region.start, 4096);
+    fl.addFreeBlockUnsorted(region.start + 4096, 2048);
+    fl.addFreeBlockUnsorted(region.start + 8192, 8192);
+    fl.sortLargeBlocks();
+    try std.testing.expectEqual(@as(Cell, 3), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 4096 + 2048 + 8192), fl.freeBytes());
+    try std.testing.expectEqual(@as(Cell, 8192), fl.largestFreeBlock());
+    fl.validateFreeList();
+
+    // Best fit: the 2048 block, not the first-added 4096 one.
+    const a = fl.allocate(1500).?;
+    try std.testing.expectEqual(region.start + 4096, a);
+    try std.testing.expectEqual(@as(Cell, 3), fl.freeBlockCount());
+    try std.testing.expectEqual(@as(Cell, 4096 + 2048 + 8192 - 1504), fl.freeBytes());
+    // The remainder (544 bytes) is itself a large block right after it.
+    const rem: *const FreeBlock = @ptrFromInt(a + 1504);
+    try std.testing.expect(rem.isFree());
+    try std.testing.expectEqual(@as(Cell, 544), rem.size());
+    fl.validateFreeList();
+
+    // Blocks too small to track are ignored.
+    fl.addFreeBlock(region.start + 8192 + 8192, 8);
+    try std.testing.expectEqual(@as(Cell, 3), fl.freeBlockCount());
+}
+
+test "free_list canAllot requires at least an allocation page" {
+    var region = try TestRegion.init(4096);
+    defer region.deinit();
+    var fl = FreeListAllocator.init(std.testing.allocator, region.start, region.size);
+    defer fl.deinit();
+    try std.testing.expect(fl.canAllot(16));
+    try std.testing.expect(fl.canAllot(4096));
+    _ = fl.allocate(3584).?; // leaves 512
+    try std.testing.expectEqual(@as(Cell, 512), fl.largestFreeBlock());
+    try std.testing.expect(!fl.canAllot(16));
+    try std.testing.expect(fl.allocate(512) != null);
+    try std.testing.expectEqual(@as(Cell, 0), fl.freeBytes());
+}
+
+test "objectSizeFromHeader reads the aligned size of a heap object" {
+    var buf: [8]Cell align(16) = .{0} ** 8;
+    const arr: *layouts.Array = @ptrCast(&buf);
+    arr.header = @as(Cell, @intFromEnum(layouts.TypeTag.array)) << 2;
+    arr.capacity = layouts.tagFixnum(3);
+    try std.testing.expectEqual(layouts.alignCell(@sizeOf(layouts.Array) + 3 * @sizeOf(Cell), layouts.data_alignment), objectSizeFromHeader(@intFromPtr(&buf)));
+    arr.capacity = layouts.tagFixnum(0);
+    try std.testing.expectEqual(@as(Cell, 16), objectSizeFromHeader(@intFromPtr(&buf)));
+}

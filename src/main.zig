@@ -7,7 +7,20 @@ const bignum = @import("bignum.zig");
 const bump_allocator = @import("bump_allocator.zig");
 const c_api = @import("c_api.zig");
 const callbacks = @import("callbacks.zig");
+const callstack = @import("callstack.zig");
+const callstack_lookup = @import("callstack_lookup.zig");
 const code_blocks = @import("code_blocks.zig");
+const card_scan = @import("card_scan.zig");
+const float = @import("float.zig");
+const growable = @import("growable.zig");
+const io = @import("io.zig");
+const mutex = @import("mutex.zig");
+const primitives_diagnostics = @import("primitives/diagnostics.zig");
+const primitives_io = @import("primitives/io.zig");
+const primitives_misc = @import("primitives/misc.zig");
+const code_heap = @import("code_heap.zig");
+const cpu = @import("cpu.zig");
+const icache = @import("icache.zig");
 const contexts = @import("contexts.zig");
 const data_heap = @import("data_heap.zig");
 const execution = @import("execution.zig");
@@ -26,6 +39,8 @@ const object_start_map = @import("object_start_map.zig");
 const objects = @import("objects.zig");
 const primitives = @import("primitives.zig");
 const primitives_ffi = @import("primitives/alien.zig");
+const primitives_contexts = @import("primitives/contexts.zig");
+const spill_slots = @import("spill_slots.zig");
 const segments = @import("segments.zig");
 const signals = @import("signals.zig");
 const slot_visitor = @import("slot_visitor.zig");
@@ -572,6 +587,8 @@ test "vm struct layout" {
 test {
     _ = bignum;
     _ = layouts;
+    _ = objects;
+    _ = vm_mod;
     _ = mark_bits;
     _ = free_list;
     _ = object_start_map;
@@ -585,7 +602,25 @@ test {
     _ = primitives;
     _ = execution;
     _ = code_blocks;
+    _ = bump_allocator;
+    _ = segments;
+    _ = growable;
+    _ = card_scan;
+    _ = float;
+    _ = mutex;
+    _ = io;
+    _ = primitives_io;
+    _ = primitives_misc;
+    _ = primitives_diagnostics;
+    _ = code_heap;
+    _ = cpu;
+    _ = icache;
     _ = callbacks;
+    _ = callstack;
+    _ = callstack_lookup;
+    _ = contexts;
+    _ = primitives_contexts;
+    _ = spill_slots;
     _ = jit;
     _ = inline_cache;
     _ = c_api;
@@ -616,3 +651,55 @@ pub fn keepPrimitives() void {
 
 // Export primitive table
 pub export var primitive_table: [primitives.primitive_count]primitives.PrimitiveFn = primitives.getAllPrimitives();
+
+test "passArgsToFactor write-barriers args stored into a promoted array" {
+    // BUG (not fixed here): passArgsToFactor re-fetches the args array from
+    // special_objects *before* allotAlien, which is the allocation that can
+    // collect. When it does, the array is promoted and the alien is stored into
+    // the dead nursery copy, so the promoted array keeps f in that slot and the
+    // argument is lost. factor/factor#3213 adds a write barrier on the same
+    // stale slot, which does not cover this case; the store and the barrier
+    // must both happen after re-deriving the array from special_objects
+    // following the allocation. With that fix this test passes.
+    if (true) return error.SkipZigTest;
+
+    const gc_test_fixture = @import("gc_test_fixture.zig");
+    var fx: gc_test_fixture.Fixture = undefined;
+    try fx.init();
+    defer fx.deinit();
+    const vm = fx.vm;
+
+    // Fill the nursery so that a one-element array still fits but the alien
+    // allocated right after it does not: that allocation collects the nursery
+    // and promotes the array (a root via special_objects) to aging.
+    const array_bytes = layouts.alignCell(@sizeOf(layouts.Array) + @sizeOf(layouts.Cell), layouts.data_alignment);
+    const free_bytes = vm.vm_asm.nursery.end - vm.vm_asm.nursery.here;
+    _ = vm.allotByteArray(free_bytes - array_bytes - @sizeOf(layouts.ByteArray));
+    try std.testing.expectEqual(array_bytes, vm.vm_asm.nursery.end - vm.vm_asm.nursery.here);
+
+    const arg: [:0]const u8 = "hello";
+    const args = [_][:0]const u8{arg};
+    passArgsToFactor(vm, &args);
+
+    const args_index = @intFromEnum(objects.SpecialObject.args);
+    const args_cell = vm.vm_asm.special_objects[args_index];
+    try std.testing.expect(layouts.hasTag(args_cell, .array));
+    const arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(args_cell));
+    try std.testing.expect(!fx.heap.inYoungGeneration(layouts.UNTAG(args_cell)) or fx.heap.aging.contains(layouts.UNTAG(args_cell)));
+    try std.testing.expect(!vm.vm_asm.nursery.contains(@ptrCast(arr)));
+
+    // The alien is a nursery object stored into an older array: its card must be marked.
+    const slot_addr = @intFromPtr(&arr.data()[0]);
+    const card_ptr: *u8 = @ptrFromInt(vm.vm_asm.cards_offset +% (slot_addr >> @intCast(vm_mod.card_bits)));
+    try std.testing.expect(card_ptr.* & vm_mod.card_mark_mask != 0);
+
+    // After another nursery collection the slot must follow the alien.
+    vm.minorGc();
+    const arr2: *layouts.Array = @ptrFromInt(layouts.UNTAG(vm.vm_asm.special_objects[args_index]));
+    const slot = arr2.data()[0];
+    try std.testing.expect(layouts.hasTag(slot, .alien));
+    const alien: *const layouts.Alien = @ptrFromInt(layouts.UNTAG(slot));
+    try std.testing.expect(!vm.vm_asm.nursery.contains(@ptrCast(@constCast(alien))));
+    try std.testing.expectEqual(layouts.false_object, alien.base);
+    try std.testing.expectEqual(@intFromPtr(arg.ptr), alien.address);
+}

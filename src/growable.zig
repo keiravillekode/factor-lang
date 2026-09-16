@@ -266,3 +266,170 @@ pub const GrowableByteArray = struct {
         return self.elements;
     }
 };
+
+// --- Tests ---
+
+const TestHeap = struct {
+    vm: *vm_mod.FactorVM,
+    heap: *@import("data_heap.zig").DataHeap,
+
+    fn init() !TestHeap {
+        const data_heap_mod = @import("data_heap.zig");
+        const allocator = std.testing.allocator;
+        const vm = try vm_mod.FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        const heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        return .{ .vm = vm, .heap = heap };
+    }
+
+    fn deinit(self: *TestHeap) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+};
+
+fn arrayData(tagged: Cell) [*]Cell {
+    const arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(tagged));
+    return arr.data();
+}
+
+fn byteArrayData(tagged: Cell) [*]u8 {
+    const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+    return ba.data();
+}
+
+test "growable array doubles its capacity and keeps elements in order" {
+    var t = try TestHeap.init();
+    defer t.deinit();
+
+    var g = GrowableArray.init(t.vm, 2) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(Cell, 0), g.count);
+    try std.testing.expectEqual(@as(Cell, 2), g.capacity());
+    try std.testing.expect(layouts.hasTag(g.toArray(), .array));
+
+    var i: Cell = 0;
+    while (i < 5) : (i += 1) {
+        try std.testing.expect(g.add(layouts.tagFixnum(@intCast(i * 10))));
+    }
+    try std.testing.expectEqual(@as(Cell, 5), g.count);
+    try std.testing.expectEqual(@as(Cell, 8), g.capacity());
+    const data = arrayData(g.toArray());
+    i = 0;
+    while (i < 5) : (i += 1) {
+        try std.testing.expectEqual(layouts.tagFixnum(@intCast(i * 10)), data[i]);
+    }
+    // Unused slots keep the fill value from allotArray.
+    try std.testing.expectEqual(layouts.false_object, data[5]);
+
+    // Heap references are stored as-is.
+    const ba = t.vm.allotByteArray(3);
+    try std.testing.expect(g.add(ba));
+    try std.testing.expectEqual(ba, arrayData(g.toArray())[5]);
+
+    // trim shrinks the backing array to exactly count elements.
+    try std.testing.expect(g.trim());
+    try std.testing.expectEqual(@as(Cell, 6), g.capacity());
+    try std.testing.expectEqual(@as(Cell, 6), g.count);
+    const trimmed = arrayData(g.toArray());
+    try std.testing.expectEqual(layouts.tagFixnum(40), trimmed[4]);
+    try std.testing.expectEqual(ba, trimmed[5]);
+}
+
+test "growable array append copies a whole array and grows once" {
+    var t = try TestHeap.init();
+    defer t.deinit();
+
+    var g = GrowableArray.init(t.vm, 2) orelse return error.OutOfMemory;
+    try std.testing.expect(g.add(layouts.tagFixnum(1)));
+    try std.testing.expect(g.add(layouts.tagFixnum(2)));
+
+    const src = t.vm.allotArray(3, layouts.tagFixnum(9)) orelse return error.OutOfMemory;
+    try std.testing.expect(g.append(src));
+    try std.testing.expectEqual(@as(Cell, 5), g.count);
+    try std.testing.expectEqual(@as(Cell, 10), g.capacity());
+    const data = arrayData(g.toArray());
+    try std.testing.expectEqual(layouts.tagFixnum(1), data[0]);
+    try std.testing.expectEqual(layouts.tagFixnum(2), data[1]);
+    try std.testing.expectEqual(layouts.tagFixnum(9), data[2]);
+    try std.testing.expectEqual(layouts.tagFixnum(9), data[4]);
+
+    // Appending an empty array changes nothing.
+    const empty = t.vm.allotArray(0, layouts.false_object) orelse return error.OutOfMemory;
+    try std.testing.expect(g.append(empty));
+    try std.testing.expectEqual(@as(Cell, 5), g.count);
+    try std.testing.expectEqual(@as(Cell, 10), g.capacity());
+
+    // An array of heap references that fits does not grow the backing array.
+    const ba = t.vm.allotByteArray(2);
+    const refs = t.vm.allotArray(2, ba) orelse return error.OutOfMemory;
+    try std.testing.expect(g.append(refs));
+    try std.testing.expectEqual(@as(Cell, 7), g.count);
+    try std.testing.expectEqual(@as(Cell, 10), g.capacity());
+    try std.testing.expectEqual(ba, arrayData(g.toArray())[6]);
+}
+
+test "growable byte array appends bytes and grows geometrically" {
+    var t = try TestHeap.init();
+    defer t.deinit();
+
+    var g = GrowableByteArray.init(t.vm, 4);
+    try std.testing.expectEqual(@as(Cell, 0), g.count);
+    try std.testing.expectEqual(@as(Cell, 4), g.capacity());
+    try std.testing.expect(layouts.hasTag(g.toByteArray(), .byte_array));
+
+    try std.testing.expect(g.appendBytes("hello", 5));
+    try std.testing.expectEqual(@as(Cell, 5), g.count);
+    try std.testing.expectEqual(@as(Cell, 10), g.capacity());
+    try std.testing.expectEqualStrings("hello", byteArrayData(g.toByteArray())[0..5]);
+
+    try std.testing.expect(g.appendBytes(" world", 6));
+    try std.testing.expectEqual(@as(Cell, 11), g.count);
+    try std.testing.expectEqual(@as(Cell, 22), g.capacity());
+    try std.testing.expectEqualStrings("hello world", byteArrayData(g.toByteArray())[0..11]);
+
+    // growBytes reserves without writing and without growing when it fits.
+    try std.testing.expect(g.growBytes(3));
+    try std.testing.expectEqual(@as(Cell, 14), g.count);
+    try std.testing.expectEqual(@as(Cell, 22), g.capacity());
+
+    const src = t.vm.allotByteArray(2);
+    @memcpy(byteArrayData(src)[0..2], "!!");
+    try std.testing.expect(g.appendByteArray(src));
+    try std.testing.expectEqual(@as(Cell, 16), g.count);
+    try std.testing.expectEqualStrings("!!", byteArrayData(g.toByteArray())[14..16]);
+
+    // trim of a nursery byte array shrinks in place.
+    const before = g.toByteArray();
+    try std.testing.expect(g.trim());
+    try std.testing.expectEqual(before, g.toByteArray());
+    try std.testing.expectEqual(@as(Cell, 16), g.capacity());
+    try std.testing.expectEqualStrings("hello world", byteArrayData(g.toByteArray())[0..11]);
+}
+
+test "growable byte array reallot keeps contents when growing" {
+    var t = try TestHeap.init();
+    defer t.deinit();
+
+    var g = GrowableByteArray.init(t.vm, 8);
+    try std.testing.expect(g.appendBytes("abc", 3));
+    const same = g.toByteArray();
+    try std.testing.expect(g.reallotArray(8));
+    try std.testing.expectEqual(same, g.toByteArray());
+
+    try std.testing.expect(g.reallotArray(64));
+    try std.testing.expect(g.toByteArray() != same);
+    try std.testing.expectEqual(@as(Cell, 64), g.capacity());
+    try std.testing.expectEqual(@as(Cell, 3), g.count);
+    try std.testing.expectEqualStrings("abc", byteArrayData(g.toByteArray())[0..3]);
+
+    // Appending a byte array that exactly fills the capacity triggers growth
+    // (growth happens at >= capacity).
+    const big = t.vm.allotByteArray(61);
+    try std.testing.expect(g.appendByteArray(big));
+    try std.testing.expectEqual(@as(Cell, 64), g.count);
+    try std.testing.expectEqual(@as(Cell, 128), g.capacity());
+}

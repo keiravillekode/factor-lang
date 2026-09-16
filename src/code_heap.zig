@@ -506,3 +506,409 @@ fn isNonDecreasing(values: []const Cell) bool {
     }
     return true;
 }
+
+// --- Tests ---
+
+const testing = std.testing;
+const CodeBlockType = code_blocks_mod.CodeBlockType;
+const RelocationEntry = code_blocks_mod.RelocationEntry;
+
+// A code heap over a page-aligned buffer (never executed), with the same
+// free-list allocator the image loader installs.
+const TestCodeHeap = struct {
+    region: []u8,
+    alloc: free_list.FreeListAllocator,
+    heap: CodeHeap,
+
+    fn init(self: *TestCodeHeap, size: Cell) !void {
+        self.region = try std.heap.page_allocator.alloc(u8, size);
+        @memset(self.region, 0);
+        const start_addr = @intFromPtr(self.region.ptr);
+        self.alloc = free_list.FreeListAllocator.init(testing.allocator, start_addr, size);
+        self.heap = CodeHeap{
+            .seg = null,
+            .free_list = &self.alloc,
+            .safepoint_page = 0,
+            .code_start = start_addr,
+            .code_size = size,
+            .allocator = testing.allocator,
+            .remembered_sets = write_barrier.CodeHeapRememberedSets.init(testing.allocator),
+        };
+    }
+
+    fn deinit(self: *TestCodeHeap) void {
+        self.heap.deinit();
+        self.alloc.deinit();
+        std.heap.page_allocator.free(self.region);
+    }
+
+    fn allocBlock(self: *TestCodeHeap, size: Cell, block_type: CodeBlockType) *CodeBlock {
+        const block = self.heap.allocate(size) orelse @panic("code heap allocate failed");
+        block.initialize(block_type, layouts.alignCell(size, layouts.data_alignment), 0);
+        return block;
+    }
+
+    fn start(self: *const TestCodeHeap) Cell {
+        return self.heap.code_start;
+    }
+
+    fn end(self: *const TestCodeHeap) Cell {
+        return self.heap.code_start + self.heap.code_size;
+    }
+};
+
+// Byte array holding relocation entries, in 16-byte aligned stack memory.
+const RelocBytes = struct {
+    buf: [8]Cell align(16),
+
+    fn init(entries: []const RelocationEntry) RelocBytes {
+        var self: RelocBytes = .{ .buf = .{0} ** 8 };
+        const ba: *layouts.ByteArray = @ptrCast(&self.buf);
+        ba.header = @as(Cell, @intFromEnum(layouts.TypeTag.byte_array)) << 2;
+        ba.capacity = layouts.tagFixnum(@intCast(entries.len * @sizeOf(RelocationEntry)));
+        for (entries, 0..) |e, i| {
+            std.mem.writeInt(u32, ba.data()[i * 4 ..][0..4], e.value, .little);
+        }
+        return self;
+    }
+
+    fn tagged(self: *const RelocBytes) Cell {
+        return @intFromPtr(&self.buf) | @intFromEnum(layouts.TypeTag.byte_array);
+    }
+};
+
+test "code heap allocate, lookup by address and free" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const free_before = th.alloc.freeBytes();
+    try testing.expectEqual(@as(Cell, 0), th.heap.occupiedSpace());
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(200, .unoptimized);
+    try testing.expect(a != b);
+    try testing.expectEqual(@as(Cell, 64), a.size());
+    try testing.expectEqual(@as(Cell, 208), b.size());
+    try testing.expectEqual(@as(Cell, 64 + 208), th.heap.occupiedSpace());
+    try testing.expectEqual(free_before - 64 - 208, th.alloc.freeBytes());
+
+    for ([_]*CodeBlock{ a, b }) |blk| {
+        const addr = @intFromPtr(blk);
+        try testing.expect(addr >= th.start() and addr + blk.size() <= th.end());
+        // Start, entry point and last byte resolve to the block.
+        try testing.expectEqual(blk, th.heap.codeBlockForAddress(addr).?);
+        try testing.expectEqual(blk, th.heap.codeBlockForAddress(blk.entryPoint()).?);
+        try testing.expectEqual(blk, th.heap.codeBlockForAddress(addr + blk.size() - 1).?);
+        // One past the end is never this block.
+        if (th.heap.codeBlockForAddress(addr + blk.size())) |other| {
+            try testing.expect(other != blk);
+        }
+    }
+    try testing.expectEqual(@as(?*CodeBlock, null), th.heap.codeBlockForAddress(th.start() - 1));
+    try testing.expectEqual(@as(?*CodeBlock, null), th.heap.codeBlockForAddress(th.end()));
+    try testing.expectEqual(@as(?*CodeBlock, null), th.heap.codeBlockForAddress(0));
+
+    // Both blocks are still in the pending list; flushing sorts them.
+    try testing.expectEqual(@as(usize, 2), th.heap.pending_blocks.items.len);
+    th.heap.flushPending();
+    try testing.expectEqual(@as(usize, 0), th.heap.pending_blocks.items.len);
+    const sorted = th.heap.all_blocks_sorted.items;
+    try testing.expectEqual(@as(usize, 2), sorted.len);
+    try testing.expect(sorted[0] < sorted[1]);
+    th.heap.verifyAllBlocksSet();
+
+    // Lookup still works from the sorted list.
+    try testing.expectEqual(a, th.heap.codeBlockForAddress(a.entryPoint() + 3).?);
+    try testing.expectEqual(b, th.heap.codeBlockForAddress(b.entryPoint() + 3).?);
+
+    // Freeing returns the bytes, marks the header and drops the block.
+    th.heap.free(a);
+    try testing.expect(a.isFree());
+    try testing.expectEqual(@as(Cell, 64), a.size());
+    try testing.expectEqual(@as(Cell, 208), th.heap.occupiedSpace());
+    try testing.expectEqual(free_before - 208, th.alloc.freeBytes());
+    try testing.expectEqual(@as(?*CodeBlock, null), th.heap.codeBlockForAddress(@intFromPtr(a)));
+    try testing.expectEqual(@as(usize, 1), th.heap.all_blocks_sorted.items.len);
+    try testing.expectEqual(@intFromPtr(b), th.heap.all_blocks_sorted.items[0]);
+    th.heap.verifyAllBlocksSet();
+
+    // The freed bytes are reused by an allocation of the same size.
+    const c = th.allocBlock(64, .pic);
+    try testing.expectEqual(@intFromPtr(a), @intFromPtr(c));
+    try testing.expect(c.isPic());
+    th.heap.flushPending();
+    th.heap.verifyAllBlocksSet();
+}
+
+test "code heap free from the pending list and flush deduplicates" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const a = th.allocBlock(48, .optimized);
+    const b = th.allocBlock(48, .optimized);
+    const c = th.allocBlock(48, .optimized);
+    // Free a block that is still pending: removed from pending, never sorted.
+    th.heap.free(b);
+    try testing.expectEqual(@as(usize, 2), th.heap.pending_blocks.items.len);
+    th.heap.flushPending();
+    try testing.expectEqual(@as(usize, 2), th.heap.all_blocks_sorted.items.len);
+    th.heap.verifyAllBlocksSet();
+
+    // Flushing a duplicate of an already sorted address keeps one entry.
+    th.heap.pending_blocks.append(testing.allocator, @intFromPtr(a)) catch unreachable;
+    th.heap.pending_blocks.append(testing.allocator, @intFromPtr(c)) catch unreachable;
+    th.heap.flushPending();
+    try testing.expectEqual(@as(usize, 2), th.heap.all_blocks_sorted.items.len);
+    th.heap.verifyAllBlocksSet();
+
+    // Rebuilding from the heap walk gives the same set.
+    try th.heap.initializeAllBlocksSet();
+    try testing.expectEqual(@as(usize, 2), th.heap.all_blocks_sorted.items.len);
+    const lo = @min(@intFromPtr(a), @intFromPtr(c));
+    const hi = @max(@intFromPtr(a), @intFromPtr(c));
+    try testing.expectEqual(lo, th.heap.all_blocks_sorted.items[0]);
+    try testing.expectEqual(hi, th.heap.all_blocks_sorted.items[1]);
+}
+
+test "code heap extent covers the last occupied block" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    try testing.expectEqual(@as(Cell, 0), th.heap.codeHeapExtent());
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(64, .optimized);
+    const a_end = @intFromPtr(a) + a.size();
+    const b_end = @intFromPtr(b) + b.size();
+    try testing.expectEqual(@max(a_end, b_end) - th.start(), th.heap.codeHeapExtent());
+
+    // Free the higher block: the extent shrinks to the lower one.
+    const high = if (a_end > b_end) a else b;
+    const low = if (a_end > b_end) b else a;
+    th.heap.free(high);
+    try testing.expectEqual(@intFromPtr(low) + low.size() - th.start(), th.heap.codeHeapExtent());
+    th.heap.free(low);
+    try testing.expectEqual(@as(Cell, 0), th.heap.codeHeapExtent());
+    try testing.expectEqual(@as(Cell, 0), th.heap.occupiedSpace());
+}
+
+test "code heap remembered sets track written blocks" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(64, .optimized);
+    try testing.expect(!th.heap.remembered_sets.hasAny());
+
+    try th.heap.writeBarrier(a);
+    try testing.expect(th.heap.remembered_sets.hasAny());
+    try testing.expectEqual(@as(usize, 1), th.heap.remembered_sets.nurseryDirtyBlocks().len);
+    try testing.expectEqual(@as(usize, 1), th.heap.remembered_sets.agingDirtyBlocks().len);
+    const idx = (@intFromPtr(a) - th.start()) / layouts.data_alignment;
+    try testing.expectEqual(idx, th.heap.remembered_sets.nurseryDirtyBlocks()[0]);
+
+    // Writing the same block again does not duplicate it.
+    try th.heap.writeBarrier(a);
+    try testing.expectEqual(@as(usize, 1), th.heap.remembered_sets.nurseryDirtyBlocks().len);
+    try th.heap.writeBarrier(b);
+    try testing.expectEqual(@as(usize, 2), th.heap.remembered_sets.nurseryDirtyBlocks().len);
+
+    // Freeing a block removes it from the sets; the dirty list keeps a
+    // stale entry that iteration filters by isFree().
+    th.heap.free(a);
+    try testing.expect(th.heap.remembered_sets.hasAny());
+    try testing.expectEqual(@as(usize, 1), th.heap.remembered_sets.nursery_count);
+    th.heap.free(b);
+    try testing.expect(!th.heap.remembered_sets.hasAny());
+
+    const c = th.allocBlock(64, .optimized);
+    try th.heap.writeBarrier(c);
+    try testing.expect(th.heap.remembered_sets.hasAny());
+    th.heap.clearRememberedSets();
+    try testing.expect(!th.heap.remembered_sets.hasAny());
+    try testing.expectEqual(@as(usize, 0), th.heap.remembered_sets.nurseryDirtyBlocks().len);
+}
+
+test "code heap scan flags follow the relocation table" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(64, .optimized);
+    const c = th.allocBlock(64, .optimized);
+
+    // Without scan flags every block is (conservatively) scanned.
+    try testing.expect(th.heap.blockHasLiterals(a));
+    try testing.expect(th.heap.blockHasCodePointers(a));
+
+    var lit_only = RelocBytes.init(&.{RelocationEntry.init(.literal, .absolute_cell, 8)});
+    var ep_only = RelocBytes.init(&.{RelocationEntry.init(.entry_point, .relative, 8)});
+    var both = RelocBytes.init(&.{
+        RelocationEntry.init(.vm, .absolute_cell, 8),
+        RelocationEntry.init(.literal, .absolute_cell, 16),
+        RelocationEntry.init(.entry_point_pic_tail, .relative, 24),
+    });
+    a.relocation = lit_only.tagged();
+    b.relocation = ep_only.tagged();
+    c.relocation = both.tagged();
+
+    th.heap.updateScanFlags(testing.allocator, a);
+    th.heap.updateScanFlags(testing.allocator, b);
+    th.heap.updateScanFlags(testing.allocator, c);
+    try testing.expect(th.heap.blockHasLiterals(a));
+    try testing.expect(!th.heap.blockHasCodePointers(a));
+    try testing.expect(!th.heap.blockHasLiterals(b));
+    try testing.expect(th.heap.blockHasCodePointers(b));
+    try testing.expect(th.heap.blockHasLiterals(c));
+    try testing.expect(th.heap.blockHasCodePointers(c));
+
+    th.heap.removeScanFlags(c);
+    try testing.expect(!th.heap.blockHasLiterals(c));
+    try testing.expect(!th.heap.blockHasCodePointers(c));
+    th.heap.removeScanFlagsByAddress(@intFromPtr(a));
+    try testing.expect(!th.heap.blockHasLiterals(a));
+
+    // A rebuild recomputes every live block from its relocation table.
+    th.heap.rebuildScanFlags(testing.allocator);
+    try testing.expect(th.heap.blockHasLiterals(a));
+    try testing.expect(th.heap.blockHasCodePointers(b));
+    try testing.expect(th.heap.blockHasLiterals(c) and th.heap.blockHasCodePointers(c));
+
+    th.heap.clearScanFlags();
+    try testing.expect(!th.heap.blockHasLiterals(a) and !th.heap.blockHasCodePointers(b));
+
+    // A block with no relocation table has nothing to scan.
+    c.relocation = layouts.false_object;
+    th.heap.updateScanFlags(testing.allocator, c);
+    try testing.expect(!th.heap.blockHasLiterals(c) and !th.heap.blockHasCodePointers(c));
+}
+
+test "code heap uninitialized block bookkeeping" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(64, .optimized);
+    try testing.expect(!th.heap.isBlockUninitialized(a));
+
+    try th.heap.putUninitializedBlock(testing.allocator, @intFromPtr(a), layouts.tagFixnum(7));
+    try th.heap.putUninitializedBlock(testing.allocator, @intFromPtr(b), layouts.tagFixnum(9));
+    try testing.expect(th.heap.isBlockUninitialized(a));
+    try testing.expect(th.heap.isUninitializedAddress(@intFromPtr(b)));
+    try testing.expectEqual(layouts.tagFixnum(7), th.heap.uninitialized_blocks.get(@intFromPtr(a)).?);
+
+    try testing.expect(th.heap.removeUninitializedBlock(@intFromPtr(a)));
+    try testing.expect(!th.heap.removeUninitializedBlock(@intFromPtr(a)));
+    try testing.expect(!th.heap.isBlockUninitialized(a));
+    try testing.expect(th.heap.isBlockUninitialized(b));
+
+    // Freeing a block also forgets it.
+    th.heap.free(b);
+    try testing.expect(!th.heap.isUninitializedAddress(@intFromPtr(b)));
+
+    try th.heap.putUninitializedBlock(testing.allocator, @intFromPtr(a), layouts.false_object);
+    th.heap.clearUninitializedBlocks();
+    try testing.expectEqual(@as(usize, 0), th.heap.uninitialized_blocks.count());
+}
+
+test "code heap mark bits" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    try testing.expectEqual(@as(?*mark_bits.MarkBits, null), th.heap.marks);
+    try th.heap.ensureMarks(testing.allocator);
+    const marks = th.heap.marks.?;
+    // Idempotent.
+    try th.heap.ensureMarks(testing.allocator);
+    try testing.expectEqual(marks, th.heap.marks.?);
+
+    const a = th.allocBlock(64, .optimized);
+    const b = th.allocBlock(64, .optimized);
+    try testing.expect(!marks.isMarked(@intFromPtr(a)));
+    try testing.expect(marks.tryMarkStart(@intFromPtr(a), a.size()));
+    try testing.expect(!marks.tryMarkStart(@intFromPtr(a), a.size()));
+    try testing.expect(marks.isMarked(@intFromPtr(a)));
+    try testing.expect(!marks.isMarked(@intFromPtr(b)));
+    try testing.expectEqual(a.size() / layouts.data_alignment, marks.countMarked());
+
+    th.heap.clearMarks();
+    try testing.expect(!marks.isMarked(@intFromPtr(a)));
+    try testing.expectEqual(@as(Cell, 0), marks.countMarked());
+}
+
+test "code heap batch removal and freeBlockOnly" {
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    var blocks: [4]*CodeBlock = undefined;
+    for (&blocks) |*slot| slot.* = th.allocBlock(64, .optimized);
+    th.heap.flushPending();
+    try testing.expectEqual(@as(usize, 4), th.heap.all_blocks_sorted.items.len);
+
+    // freeBlockOnly frees the memory but leaves all_blocks to the caller.
+    th.heap.freeBlockOnly(blocks[0]);
+    th.heap.freeBlockOnly(blocks[2]);
+    try testing.expect(blocks[0].isFree() and blocks[2].isFree());
+    try testing.expectEqual(@as(usize, 4), th.heap.all_blocks_sorted.items.len);
+
+    var removes = [_]Cell{ @intFromPtr(blocks[0]), @intFromPtr(blocks[2]) };
+    std.mem.sort(Cell, &removes, {}, std.sort.asc(Cell));
+    th.heap.batchRemoveFromAllBlocks(&removes);
+    try testing.expectEqual(@as(usize, 2), th.heap.all_blocks_sorted.items.len);
+    th.heap.verifyAllBlocksSet();
+    try testing.expectEqual(@as(?*CodeBlock, null), th.heap.codeBlockForAddress(@intFromPtr(blocks[0]) + @sizeOf(CodeBlock)));
+    try testing.expectEqual(blocks[1], th.heap.codeBlockForAddress(blocks[1].entryPoint()).?);
+
+    // Unsorted (and duplicated) removal lists take the slow path.
+    th.heap.freeBlockOnly(blocks[1]);
+    th.heap.freeBlockOnly(blocks[3]);
+    const hi = @max(@intFromPtr(blocks[1]), @intFromPtr(blocks[3]));
+    const lo = @min(@intFromPtr(blocks[1]), @intFromPtr(blocks[3]));
+    th.heap.batchRemoveFromAllBlocks(&.{ hi, lo, hi });
+    try testing.expectEqual(@as(usize, 0), th.heap.all_blocks_sorted.items.len);
+    th.heap.verifyAllBlocksSet();
+    try testing.expectEqual(@as(Cell, 0), th.heap.occupiedSpace());
+
+    // Removing addresses that are not present is harmless.
+    th.heap.batchRemoveFromAllBlocks(&.{ lo, hi });
+    th.heap.batchRemoveFromAllBlocks(&.{});
+}
+
+test "code heap frame predecessor on x86-64" {
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+
+    var th: TestCodeHeap = undefined;
+    try th.init(64 * 1024);
+    defer th.deinit();
+
+    const block = th.heap.allocate(96).?;
+    block.initialize(.optimized, 96, 48);
+    th.heap.flushPending();
+
+    // A frame whose return address is inside the block, past the entry point.
+    var frame: [2]Cell align(16) = .{ block.entryPoint() + 8, 0 };
+    try testing.expectEqual(@intFromPtr(&frame) + 48, th.heap.framePredecessor(@intFromPtr(&frame)));
+
+    // At the entry point itself the frame is still a leaf frame.
+    frame[0] = block.entryPoint();
+    try testing.expectEqual(@intFromPtr(&frame) + CodeBlock.LEAF_FRAME_SIZE, th.heap.framePredecessor(@intFromPtr(&frame)));
+
+    // A block without a natural frame size is always a leaf.
+    const leaf = th.heap.allocate(64).?;
+    leaf.initialize(.unoptimized, 64, 0);
+    th.heap.flushPending();
+    frame[0] = leaf.entryPoint() + 4;
+    try testing.expectEqual(@intFromPtr(&frame) + CodeBlock.LEAF_FRAME_SIZE, th.heap.framePredecessor(@intFromPtr(&frame)));
+
+    // An address outside every block falls back to the minimum frame.
+    frame[0] = th.end() + 0x1000;
+    try testing.expectEqual(@intFromPtr(&frame) + CodeBlock.LEAF_FRAME_SIZE, th.heap.framePredecessor(@intFromPtr(&frame)));
+}

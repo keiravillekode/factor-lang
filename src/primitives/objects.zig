@@ -888,3 +888,682 @@ pub export fn primitive_quotation_code(vm_asm: *VMAssemblyFields) callconv(.c) v
     }
     vm.push(math.fromUnsignedCell(vm, entry));
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+const data_heap_mod = @import("../data_heap.zig");
+const gc_fixture = @import("../gc_test_fixture.zig");
+
+// Bare VM with a 1 MB nursery and no GC: every allocation below fits, so
+// primitives never hit the collector.
+const T = struct {
+    vm: *FactorVM,
+    heap: *data_heap_mod.DataHeap,
+    stack_base: Cell,
+
+    fn init() !T {
+        const allocator = testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        const heap = try data_heap_mod.DataHeap.init(allocator, 1024 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        return .{ .vm = vm, .heap = heap, .stack_base = vm.vm_asm.ctx.datastack };
+    }
+
+    fn deinit(self: *T) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fields(self: *T) *VMAssemblyFields {
+        return &self.vm.vm_asm;
+    }
+
+    fn push(self: *T, cell: Cell) void {
+        self.vm.push(cell);
+    }
+
+    fn pushFixnum(self: *T, n: Fixnum) void {
+        self.vm.push(layouts.tagFixnum(n));
+    }
+
+    fn pop(self: *T) Cell {
+        return self.vm.pop();
+    }
+
+    fn expectBalanced(self: *T) !void {
+        try testing.expectEqual(self.stack_base, self.vm.vm_asm.ctx.datastack);
+    }
+
+    fn array(self: *T, cells: []const Cell) Cell {
+        const tagged = self.vm.allotArray(cells.len, layouts.false_object) orelse unreachable;
+        @memcpy(arrayAt(tagged).data()[0..cells.len], cells);
+        return tagged;
+    }
+
+    fn byteArray(self: *T, bytes: []const u8) Cell {
+        const tagged = self.vm.allotByteArray(bytes.len);
+        @memcpy(byteArrayAt(tagged).data()[0..bytes.len], bytes);
+        return tagged;
+    }
+
+    // Nursery tuple layout (array-tagged) describing tuples with `slots` slots.
+    fn tupleLayout(self: *T, slots: Cell) Cell {
+        const tagged = self.vm.allotArray(gc_fixture.tuple_layout_capacity, layouts.false_object) orelse unreachable;
+        const layout: *layouts.TupleLayout = @ptrFromInt(layouts.UNTAG(tagged));
+        layout.klass = layouts.false_object;
+        layout.size = layouts.tagFixnum(@intCast(slots));
+        layout.echelon = layouts.tagFixnum(0);
+        layout.data()[0] = layouts.false_object;
+        layout.data()[1] = layouts.tagFixnum(0);
+        return tagged;
+    }
+
+    fn string(self: *T, text: []const u8) Cell {
+        self.pushFixnum(@intCast(text.len));
+        self.pushFixnum('x');
+        primitive_string(self.fields());
+        const tagged = self.pop();
+        @memcpy(stringAt(tagged).data()[0..text.len], text);
+        return tagged;
+    }
+};
+
+fn arrayAt(tagged: Cell) *layouts.Array {
+    return @ptrFromInt(layouts.UNTAG(tagged));
+}
+
+fn byteArrayAt(tagged: Cell) *layouts.ByteArray {
+    return @ptrFromInt(layouts.UNTAG(tagged));
+}
+
+fn stringAt(tagged: Cell) *layouts.String {
+    return @ptrFromInt(layouts.UNTAG(tagged));
+}
+
+fn tupleAt(tagged: Cell) *layouts.Tuple {
+    return @ptrFromInt(layouts.UNTAG(tagged));
+}
+
+fn objectAt(tagged: Cell) *layouts.Object {
+    return @ptrFromInt(layouts.UNTAG(tagged));
+}
+
+fn expectArray(tagged: Cell, expected: []const Cell) !void {
+    try testing.expect(layouts.hasTag(tagged, .array));
+    const arr = arrayAt(tagged);
+    try testing.expectEqual(expected.len, arr.getCapacity());
+    try testing.expectEqualSlices(Cell, expected, arr.data()[0..expected.len]);
+}
+
+fn expectBytes(tagged: Cell, expected: []const u8) !void {
+    try testing.expect(layouts.hasTag(tagged, .byte_array));
+    const ba = byteArrayAt(tagged);
+    try testing.expectEqual(expected.len, layouts.untagFixnumUnsigned(ba.capacity));
+    try testing.expectEqualSlices(u8, expected, ba.data()[0..expected.len]);
+}
+
+fn fx(n: Fixnum) Cell {
+    return layouts.tagFixnum(n);
+}
+
+test "primitive_array builds a filled array and roots a heap fill" {
+    var t = try T.init();
+    defer t.deinit();
+
+    t.pushFixnum(3);
+    t.pushFixnum(7);
+    primitive_array(t.fields());
+    try expectArray(t.pop(), &.{ fx(7), fx(7), fx(7) });
+
+    t.pushFixnum(0);
+    t.push(layouts.false_object);
+    primitive_array(t.fields());
+    try expectArray(t.pop(), &.{});
+
+    // A heap object as fill is rooted across the allocation and stored as-is.
+    const ba = t.byteArray("ab");
+    t.pushFixnum(2);
+    t.push(ba);
+    primitive_array(t.fields());
+    try expectArray(t.pop(), &.{ ba, ba });
+
+    // A bignum capacity that fits a fixnum is accepted.
+    const four = try bignum.fromInt64(t.vm, 4);
+    t.push(layouts.tagBignum(four));
+    t.pushFixnum(1);
+    primitive_array(t.fields());
+    try expectArray(t.pop(), &.{ fx(1), fx(1), fx(1), fx(1) });
+
+    try t.expectBalanced();
+}
+
+test "primitive_resize_array grows with f, shrinks nursery arrays in place, rejects non-arrays" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const arr = t.array(&.{ fx(1), fx(2), fx(3) });
+
+    t.pushFixnum(5);
+    t.push(arr);
+    primitive_resize_array(t.fields());
+    const grown = t.pop();
+    try testing.expect(grown != arr);
+    try expectArray(grown, &.{ fx(1), fx(2), fx(3), layouts.false_object, layouts.false_object });
+    try expectArray(arr, &.{ fx(1), fx(2), fx(3) });
+
+    t.pushFixnum(2);
+    t.push(arr);
+    primitive_resize_array(t.fields());
+    try testing.expectEqual(arr, t.pop());
+    try expectArray(arr, &.{ fx(1), fx(2) });
+
+    t.pushFixnum(2);
+    t.push(arr);
+    primitive_resize_array(t.fields());
+    try testing.expectEqual(arr, t.pop());
+
+    t.pushFixnum(2);
+    t.pushFixnum(9);
+    primitive_resize_array(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    try t.expectBalanced();
+}
+
+test "byte array primitives allocate zeroed, uninitialized and resized byte arrays" {
+    var t = try T.init();
+    defer t.deinit();
+
+    t.pushFixnum(10);
+    primitive_byte_array(t.fields());
+    const ba = t.pop();
+    try expectBytes(ba, &[_]u8{0} ** 10);
+
+    t.pushFixnum(4);
+    primitive_uninitialized_byte_array(t.fields());
+    const raw = t.pop();
+    try testing.expect(layouts.hasTag(raw, .byte_array));
+    try testing.expectEqual(@as(Cell, 4), layouts.untagFixnumUnsigned(byteArrayAt(raw).capacity));
+
+    for (byteArrayAt(ba).data()[0..10], 0..) |*b, i| b.* = @intCast(i + 1);
+
+    // ( n byte-array -- new-byte-array ): growing copies and zero-fills.
+    t.pushFixnum(16);
+    t.push(ba);
+    primitive_resize_byte_array(t.fields());
+    const grown = t.pop();
+    try testing.expect(grown != ba);
+    try expectBytes(grown, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 0, 0, 0, 0 });
+
+    // Shrinking a nursery byte array only rewrites its capacity.
+    t.pushFixnum(3);
+    t.push(ba);
+    primitive_resize_byte_array(t.fields());
+    try testing.expectEqual(ba, t.pop());
+    try expectBytes(ba, &[_]u8{ 1, 2, 3 });
+
+    t.pushFixnum(3);
+    t.push(ba);
+    primitive_resize_byte_array(t.fields());
+    try testing.expectEqual(ba, t.pop());
+
+    t.pushFixnum(3);
+    t.pushFixnum(9);
+    primitive_resize_byte_array(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    try t.expectBalanced();
+}
+
+test "primitive_string fills ASCII directly and encodes non-ASCII through an aux array" {
+    var t = try T.init();
+    defer t.deinit();
+
+    t.pushFixnum(5);
+    t.pushFixnum('a');
+    primitive_string(t.fields());
+    const s = t.pop();
+    try testing.expect(layouts.hasTag(s, .string));
+    const str = stringAt(s);
+    try testing.expectEqual(@as(usize, 5), str.getLength());
+    try testing.expectEqualStrings("aaaaa", str.data()[0..5]);
+    try testing.expectEqual(layouts.false_object, str.aux);
+    try testing.expectEqual(layouts.false_object, str.hashcode_field);
+
+    // U+03B1: low byte (ch & 0x7f) | 0x80, aux u16 (ch >> 7) ^ 1.
+    t.pushFixnum(3);
+    t.pushFixnum(0x3B1);
+    primitive_string(t.fields());
+    const s2 = t.pop();
+    const str2 = stringAt(s2);
+    try testing.expectEqual(@as(usize, 3), str2.getLength());
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xB1, 0xB1, 0xB1 }, str2.data()[0..3]);
+    try testing.expect(layouts.hasTag(str2.aux, .byte_array));
+    const aux = byteArrayAt(str2.aux);
+    try testing.expectEqual(@as(Cell, 6), layouts.untagFixnumUnsigned(aux.capacity));
+    try testing.expectEqualSlices(u8, &[_]u8{ 6, 0, 6, 0, 6, 0 }, aux.data()[0..6]);
+
+    try t.expectBalanced();
+}
+
+test "primitive_resize_string copies, zero-fills, shrinks in place and carries the aux array" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const s = t.string("hello");
+
+    t.pushFixnum(8);
+    t.push(s);
+    primitive_resize_string(t.fields());
+    const grown = t.pop();
+    try testing.expect(grown != s);
+    const g = stringAt(grown);
+    try testing.expectEqual(@as(usize, 8), g.getLength());
+    try testing.expectEqualSlices(u8, "hello\x00\x00\x00", g.data()[0..8]);
+    try testing.expectEqual(layouts.false_object, g.aux);
+    try testing.expectEqual(layouts.false_object, g.hashcode_field);
+
+    t.pushFixnum(2);
+    t.push(s);
+    primitive_resize_string(t.fields());
+    try testing.expectEqual(s, t.pop());
+    try testing.expectEqual(@as(usize, 2), stringAt(s).getLength());
+
+    t.pushFixnum(2);
+    t.push(s);
+    primitive_resize_string(t.fields());
+    try testing.expectEqual(s, t.pop());
+
+    // A string with an aux array: growing allocates a new aux of 2*n bytes
+    // holding the old high halves, shrinking in the nursery trims both.
+    t.pushFixnum(3);
+    t.pushFixnum(0x3B1);
+    primitive_string(t.fields());
+    const u = t.pop();
+
+    t.pushFixnum(5);
+    t.push(u);
+    primitive_resize_string(t.fields());
+    const u_grown = t.pop();
+    try testing.expect(u_grown != u);
+    const us = stringAt(u_grown);
+    try testing.expectEqual(@as(usize, 5), us.getLength());
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xB1, 0xB1, 0xB1, 0, 0 }, us.data()[0..5]);
+    try testing.expect(layouts.hasTag(us.aux, .byte_array));
+    const aux = byteArrayAt(us.aux);
+    try testing.expectEqual(@as(Cell, 10), layouts.untagFixnumUnsigned(aux.capacity));
+    try testing.expectEqualSlices(u8, &[_]u8{ 6, 0, 6, 0, 6, 0, 0, 0, 0, 0 }, aux.data()[0..10]);
+
+    t.pushFixnum(1);
+    t.push(u);
+    primitive_resize_string(t.fields());
+    try testing.expectEqual(u, t.pop());
+    try testing.expectEqual(@as(usize, 1), stringAt(u).getLength());
+    try testing.expectEqual(@as(Cell, 2), layouts.untagFixnumUnsigned(byteArrayAt(stringAt(u).aux).capacity));
+
+    try t.expectBalanced();
+}
+
+test "primitive_set_string_nth_fast stores a byte and ignores non-strings" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const s = t.string("abc");
+    // ( ch n string -- )
+    t.pushFixnum('Z');
+    t.pushFixnum(1);
+    t.push(s);
+    primitive_set_string_nth_fast(t.fields());
+    try testing.expectEqualStrings("aZc", stringAt(s).data()[0..3]);
+
+    t.pushFixnum(0xB1);
+    t.pushFixnum(2);
+    t.push(s);
+    primitive_set_string_nth_fast(t.fields());
+    try testing.expectEqualSlices(u8, &[_]u8{ 'a', 'Z', 0xB1 }, stringAt(s).data()[0..3]);
+
+    t.pushFixnum('Q');
+    t.pushFixnum(0);
+    t.pushFixnum(5);
+    primitive_set_string_nth_fast(t.fields());
+    try testing.expectEqualSlices(u8, &[_]u8{ 'a', 'Z', 0xB1 }, stringAt(s).data()[0..3]);
+
+    try t.expectBalanced();
+}
+
+test "primitive_clone copies heap objects, resets the hashcode and leaves immediates alone" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const arr = t.array(&.{ fx(1), fx(2) });
+    objectAt(arr).setHashcode(0x1234);
+
+    t.push(arr);
+    primitive_clone(t.fields());
+    const copy = t.pop();
+    try testing.expect(copy != arr);
+    try expectArray(copy, &.{ fx(1), fx(2) });
+    try testing.expectEqual(@as(Cell, 0), objectAt(copy).hashcode());
+    try testing.expectEqual(@as(Cell, 0x1234), objectAt(arr).hashcode());
+    try testing.expectEqual(layouts.TypeTag.array, objectAt(copy).getType());
+
+    // The copy is independent of the original.
+    arrayAt(copy).data()[0] = fx(99);
+    try expectArray(arr, &.{ fx(1), fx(2) });
+
+    t.pushFixnum(5);
+    primitive_clone(t.fields());
+    try testing.expectEqual(fx(5), t.pop());
+
+    t.push(layouts.false_object);
+    primitive_clone(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    const ba = t.byteArray("xyz");
+    t.push(ba);
+    primitive_clone(t.fields());
+    const ba2 = t.pop();
+    try testing.expect(ba2 != ba);
+    try expectBytes(ba2, "xyz");
+
+    const layout = t.tupleLayout(2);
+    t.push(layout);
+    primitive_tuple(t.fields());
+    const tup = t.pop();
+    tupleAt(tup).data()[0] = fx(7);
+    tupleAt(tup).data()[1] = ba;
+    t.push(tup);
+    primitive_clone(t.fields());
+    const tup2 = t.pop();
+    try testing.expect(tup2 != tup);
+    try testing.expect(layouts.hasTag(tup2, .tuple));
+    try testing.expectEqual(layout, tupleAt(tup2).layout);
+    try testing.expectEqualSlices(Cell, &.{ fx(7), ba }, tupleAt(tup2).data()[0..2]);
+
+    try t.expectBalanced();
+}
+
+test "primitive_wrapper boxes the top of the stack" {
+    var t = try T.init();
+    defer t.deinit();
+
+    t.pushFixnum(42);
+    primitive_wrapper(t.fields());
+    const w = t.pop();
+    try testing.expect(layouts.hasTag(w, .wrapper));
+    const wrapper: *const layouts.Wrapper = @ptrFromInt(layouts.UNTAG(w));
+    try testing.expectEqual(fx(42), wrapper.object);
+
+    const arr = t.array(&.{fx(1)});
+    t.push(arr);
+    primitive_wrapper(t.fields());
+    const w2 = t.pop();
+    const wrapper2: *const layouts.Wrapper = @ptrFromInt(layouts.UNTAG(w2));
+    try testing.expectEqual(arr, wrapper2.object);
+
+    try t.expectBalanced();
+}
+
+test "primitive_slot and primitive_set_slot address slots after the header" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const arr = t.array(&.{ fx(10), fx(20) });
+
+    // Slot numbering counts the header: slot 0 is the raw header, slot 1 an
+    // array's tagged capacity, slots 2.. its elements.
+    t.push(arr);
+    t.pushFixnum(0);
+    primitive_slot(t.fields());
+    try testing.expectEqual(@as(Cell, @intFromEnum(layouts.TypeTag.array)) << 2, t.pop());
+
+    t.push(arr);
+    t.pushFixnum(1);
+    primitive_slot(t.fields());
+    try testing.expectEqual(fx(2), t.pop());
+
+    t.push(arr);
+    t.pushFixnum(3);
+    primitive_slot(t.fields());
+    try testing.expectEqual(fx(20), t.pop());
+
+    // ( value obj n -- )
+    t.pushFixnum(99);
+    t.push(arr);
+    t.pushFixnum(2);
+    primitive_set_slot(t.fields());
+    try expectArray(arr, &.{ fx(99), fx(20) });
+
+    const ba = t.byteArray("q");
+    t.push(ba);
+    t.push(arr);
+    t.pushFixnum(3);
+    primitive_set_slot(t.fields());
+    try expectArray(arr, &.{ fx(99), ba });
+
+    try t.expectBalanced();
+}
+
+fn cardPtr(f: *gc_fixture.Fixture, slot: *const Cell) *u8 {
+    return @ptrFromInt(f.vm.vm_asm.cards_offset +% (@intFromPtr(slot) >> @intCast(vm_mod.card_bits)));
+}
+
+test "primitive_set_slot dirties the card only for an old-to-young pointer store" {
+    var f: gc_fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const holder = f.tenuredArray(2, layouts.false_object);
+    const young = f.nurseryArray(1, fx(1));
+    const slot = &gc_fixture.arrayAt(holder).data()[0];
+    const card = cardPtr(&f, slot);
+
+    // Element i of an array is slot i + 2 (header, capacity, elements...).
+    card.* = 0;
+    f.vm.push(young);
+    f.vm.push(holder);
+    f.vm.push(fx(2));
+    primitive_set_slot(&f.vm.vm_asm);
+    try testing.expectEqual(young, slot.*);
+    try testing.expectEqual(vm_mod.card_mark_mask, card.*);
+
+    card.* = 0;
+    f.vm.push(fx(5));
+    f.vm.push(holder);
+    f.vm.push(fx(3));
+    primitive_set_slot(&f.vm.vm_asm);
+    try testing.expectEqual(fx(5), gc_fixture.arrayAt(holder).data()[1]);
+    try testing.expectEqual(@as(u8, 0), card.*);
+
+    // Old-to-old stores do not dirty the card either.
+    const other = f.tenuredArray(1, fx(3));
+    card.* = 0;
+    f.vm.push(other);
+    f.vm.push(holder);
+    f.vm.push(fx(2));
+    primitive_set_slot(&f.vm.vm_asm);
+    try testing.expectEqual(other, slot.*);
+    try testing.expectEqual(@as(u8, 0), card.*);
+}
+
+test "primitive_tuple and primitive_tuple_boa build tuples from a layout" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const layout = t.tupleLayout(3);
+    t.push(layout);
+    primitive_tuple(t.fields());
+    const tup = t.pop();
+    try testing.expect(layouts.hasTag(tup, .tuple));
+    try testing.expectEqual(layout, tupleAt(tup).layout);
+    try testing.expectEqualSlices(Cell, &.{ layouts.false_object, layouts.false_object, layouts.false_object }, tupleAt(tup).data()[0..3]);
+    try testing.expectEqual(@as(Cell, @intFromEnum(layouts.TypeTag.tuple)) << 2, tupleAt(tup).header);
+    try testing.expectEqual(@as(Cell, 4), layouts.slotCount(tup));
+
+    // ( slot-values... layout -- tuple ): slots are taken in stack order.
+    t.pushFixnum(1);
+    t.pushFixnum(2);
+    t.pushFixnum(3);
+    t.push(layout);
+    primitive_tuple_boa(t.fields());
+    const boa = t.pop();
+    try testing.expect(layouts.hasTag(boa, .tuple));
+    try testing.expectEqual(layout, tupleAt(boa).layout);
+    try testing.expectEqualSlices(Cell, &.{ fx(1), fx(2), fx(3) }, tupleAt(boa).data()[0..3]);
+
+    const empty_layout = t.tupleLayout(0);
+    t.push(empty_layout);
+    primitive_tuple_boa(t.fields());
+    const empty = t.pop();
+    try testing.expectEqual(empty_layout, tupleAt(empty).layout);
+    try testing.expectEqual(@as(Cell, 1), layouts.slotCount(empty));
+
+    try t.expectBalanced();
+}
+
+test "identity hashcodes are assigned once, stay stable and differ between objects" {
+    var t = try T.init();
+    defer t.deinit();
+
+    t.pushFixnum(7);
+    primitive_identity_hashcode(t.fields());
+    try testing.expectEqual(fx(7), t.pop());
+
+    t.push(layouts.false_object);
+    primitive_identity_hashcode(t.fields());
+    try testing.expectEqual(layouts.false_object, t.pop());
+
+    const a = t.array(&.{fx(1)});
+    t.push(a);
+    primitive_identity_hashcode(t.fields());
+    try testing.expectEqual(fx(0), t.pop());
+
+    t.push(a);
+    primitive_compute_identity_hashcode(t.fields());
+    try testing.expectEqual(@as(Cell, 1), t.vm.object_counter);
+    const hc = objectAt(a).hashcode();
+    try testing.expect(hc != 0);
+    try testing.expectEqual(layouts.TypeTag.array, objectAt(a).getType());
+
+    t.push(a);
+    primitive_identity_hashcode(t.fields());
+    try testing.expectEqual(fx(@intCast(hc)), t.pop());
+    t.push(a);
+    primitive_identity_hashcode(t.fields());
+    try testing.expectEqual(fx(@intCast(hc)), t.pop());
+
+    const b = t.array(&.{fx(1)});
+    t.push(b);
+    primitive_compute_identity_hashcode(t.fields());
+    try testing.expectEqual(@as(Cell, 2), t.vm.object_counter);
+    try testing.expect(objectAt(b).hashcode() != hc);
+
+    // Immediates are ignored and do not consume a counter value.
+    t.pushFixnum(3);
+    primitive_compute_identity_hashcode(t.fields());
+    try testing.expectEqual(@as(Cell, 2), t.vm.object_counter);
+
+    try t.expectBalanced();
+}
+
+test "word_code and quotation_code report the code block range or the bare entry point" {
+    var t = try T.init();
+    defer t.deinit();
+
+    const word_cell = t.vm.allotObject(.word, @sizeOf(layouts.Word)) orelse unreachable;
+    const word: *layouts.Word = @ptrFromInt(layouts.UNTAG(word_cell));
+    word.hashcode_field = fx(0);
+    word.name = layouts.false_object;
+    word.vocabulary = layouts.false_object;
+    word.def = layouts.false_object;
+    word.props = layouts.false_object;
+    word.pic_def = layouts.false_object;
+    word.pic_tail_def = layouts.false_object;
+    word.subprimitive = layouts.false_object;
+    word.entry_point = 0;
+
+    // No compiled code: both ends are the (zero) entry point.
+    t.push(word_cell);
+    primitive_word_code(t.fields());
+    try testing.expectEqual(fx(0), t.pop());
+    try testing.expectEqual(fx(0), t.pop());
+
+    // A fake 64-byte code block whose entry point follows its header.
+    var block_buf: [8]Cell align(16) = .{0} ** 8;
+    const block: *CodeBlock = @ptrCast(&block_buf);
+    block.initialize(.unoptimized, 64, 0);
+    const entry = @intFromPtr(block) + @sizeOf(CodeBlock);
+    word.entry_point = entry;
+
+    t.push(word_cell);
+    primitive_word_code(t.fields());
+    try testing.expectEqual(fx(@intCast(@intFromPtr(block) + 64)), t.pop());
+    try testing.expectEqual(fx(@intCast(entry)), t.pop());
+
+    const quot_cell = t.vm.allotObject(.quotation, @sizeOf(layouts.Quotation)) orelse unreachable;
+    const quot: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(quot_cell));
+    quot.array = layouts.false_object;
+    quot.cached_effect = layouts.false_object;
+    quot.cache_counter = fx(0);
+    quot.entry_point = entry;
+
+    t.push(quot_cell);
+    primitive_quotation_code(t.fields());
+    try testing.expectEqual(fx(@intCast(@intFromPtr(block) + 64)), t.pop());
+    try testing.expectEqual(fx(@intCast(entry)), t.pop());
+
+    // A freed block is not trusted for the end address.
+    block.markFree(64);
+    t.push(quot_cell);
+    primitive_quotation_code(t.fields());
+    try testing.expectEqual(fx(@intCast(entry)), t.pop());
+    try testing.expectEqual(fx(@intCast(entry)), t.pop());
+
+    try t.expectBalanced();
+}
+
+test "primitive_become remaps every reference to the old objects" {
+    var f: gc_fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const old_obj = f.tenuredArray(1, fx(1));
+    const new_obj = f.tenuredArray(1, fx(2));
+    const holder = f.tenuredArray(2, old_obj);
+    const layout = f.tenuredTupleLayout(1);
+    const tup = f.tenuredTuple(layout, old_obj);
+    const old_arr = f.tenuredArray(1, old_obj);
+    const new_arr = f.tenuredArray(1, new_obj);
+
+    f.vm.push(old_obj);
+    f.vm.vm_asm.ctx.pushRetain(old_obj);
+    f.vm.setSpecialObject(.walker_hook, old_obj);
+    f.vm.vm_asm.ctx.context_objects[0] = old_obj;
+    var rooted = old_obj;
+    f.vm.data_roots.appendAssumeCapacity(&rooted);
+    defer _ = f.vm.data_roots.pop();
+
+    f.vm.push(old_arr);
+    f.vm.push(new_arr);
+    primitive_become(&f.vm.vm_asm);
+
+    try testing.expectEqualSlices(Cell, &.{ new_obj, new_obj }, gc_fixture.arrayAt(holder).data()[0..2]);
+    const tuple: *const layouts.Tuple = @ptrFromInt(layouts.UNTAG(tup));
+    try testing.expectEqual(new_obj, tuple.data()[0]);
+    try testing.expectEqual(new_obj, f.vm.vm_asm.ctx.popRetain());
+    try testing.expectEqual(new_obj, f.vm.pop());
+    try testing.expectEqual(new_obj, f.vm.specialObject(.walker_hook));
+    try testing.expectEqual(new_obj, f.vm.vm_asm.ctx.context_objects[0]);
+    try testing.expectEqual(new_obj, rooted);
+    // The mapping arrays themselves are heap objects and are rewritten too.
+    try testing.expectEqual(new_obj, gc_fixture.arrayAt(old_arr).data()[0]);
+    // The replacement object is untouched.
+    try testing.expectEqual(fx(2), gc_fixture.arrayAt(new_obj).data()[0]);
+}

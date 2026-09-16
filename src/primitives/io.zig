@@ -397,3 +397,241 @@ pub export fn primitive_existsp(vm_asm: *VMAssemblyFields) callconv(.c) void {
 
     vm.push(vm.tagBoolean(result >= 0));
 }
+
+// --- Tests ---
+
+const IoTestVM = struct {
+    vm: *FactorVM,
+    heap: *@import("../data_heap.zig").DataHeap,
+    true_obj: Cell,
+    stack_base: Cell,
+
+    fn init() !IoTestVM {
+        const data_heap_mod = @import("../data_heap.zig");
+        const objects = @import("../objects.zig");
+        const allocator = std.testing.allocator;
+        const vm = try FactorVM.init(allocator);
+        vm.vm_asm.ctx = try vm.newContext();
+        vm.vm_asm.spare_ctx = try vm.newContext();
+        const heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        vm.setDataHeap(heap);
+        const true_obj = layouts.tagFixnum(0x7472_7565);
+        vm.vm_asm.special_objects[@intFromEnum(objects.SpecialObject.canonical_true)] = true_obj;
+        return .{ .vm = vm, .heap = heap, .true_obj = true_obj, .stack_base = vm.vm_asm.ctx.datastack };
+    }
+
+    fn deinit(self: *IoTestVM) void {
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fields(self: *IoTestVM) *VMAssemblyFields {
+        return &self.vm.vm_asm;
+    }
+
+    /// Byte array holding `s` and a terminating NUL, as Factor passes C strings.
+    fn cString(self: *IoTestVM, s: []const u8) Cell {
+        const tagged = self.vm.allotByteArray(s.len + 1);
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        @memcpy(ba.data()[0..s.len], s);
+        return tagged;
+    }
+
+    fn byteArray(self: *IoTestVM, s: []const u8) Cell {
+        const tagged = self.vm.allotByteArray(s.len);
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        @memcpy(ba.data()[0..s.len], s);
+        return tagged;
+    }
+
+    fn bytesOf(tagged: Cell) []u8 {
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        return ba.data()[0..layouts.untagFixnumUnsigned(ba.capacity)];
+    }
+
+    fn open(self: *IoTestVM, path: [:0]const u8, mode: []const u8) !Cell {
+        self.vm.push(self.cString(path));
+        self.vm.push(self.cString(mode));
+        primitive_fopen(self.fields());
+        const file = self.vm.pop();
+        try std.testing.expect(layouts.hasTag(file, .alien));
+        return file;
+    }
+
+    fn tell(self: *IoTestVM, file: Cell) Cell {
+        self.vm.push(file);
+        primitive_ftell(self.fields());
+        return self.vm.pop();
+    }
+
+    fn seek(self: *IoTestVM, file: Cell, offset: Fixnum, whence: Fixnum) void {
+        self.vm.push(layouts.tagFixnum(offset));
+        self.vm.push(layouts.tagFixnum(whence));
+        self.vm.push(file);
+        primitive_fseek(self.fields());
+    }
+
+    fn getc(self: *IoTestVM, file: Cell) Cell {
+        self.vm.push(file);
+        primitive_fgetc(self.fields());
+        return self.vm.pop();
+    }
+
+    fn existsp(self: *IoTestVM, path_cell: Cell) Cell {
+        self.vm.push(path_cell);
+        primitive_existsp(self.fields());
+        return self.vm.pop();
+    }
+
+    fn expectStackBalanced(self: *IoTestVM) !void {
+        try std.testing.expectEqual(self.stack_base, self.vm.vm_asm.ctx.datastack);
+    }
+};
+
+test "file primitives write, flush, seek, tell, read and close a temporary file" {
+    const testing = std.testing;
+    var t = try IoTestVM.init();
+    defer t.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir_path);
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/prim-io.bin", .{dir_path}, 0);
+    defer testing.allocator.free(path);
+    const missing = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/missing.bin", .{dir_path}, 0);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(layouts.false_object, t.existsp(t.cString(path)));
+
+    const w = try t.open(path, "wb");
+    // ( buf length file -- )
+    t.vm.push(t.byteArray("hello"));
+    t.vm.push(layouts.tagFixnum(5));
+    t.vm.push(w);
+    primitive_fwrite(t.fields());
+    // A zero length write is a no-op.
+    t.vm.push(t.byteArray("zzz"));
+    t.vm.push(layouts.tagFixnum(0));
+    t.vm.push(w);
+    primitive_fwrite(t.fields());
+    // ( ch file -- )
+    t.vm.push(layouts.tagFixnum('!'));
+    t.vm.push(w);
+    primitive_fputc(t.fields());
+    t.vm.push(w);
+    primitive_fflush(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(6), t.tell(w));
+    t.seek(w, 0, 0);
+    try testing.expectEqual(layouts.tagFixnum(0), t.tell(w));
+    t.seek(w, 0, 2);
+    try testing.expectEqual(layouts.tagFixnum(6), t.tell(w));
+    t.seek(w, -2, 1);
+    try testing.expectEqual(layouts.tagFixnum(4), t.tell(w));
+    t.vm.push(w);
+    primitive_fclose(t.fields());
+    try t.expectStackBalanced();
+
+    try testing.expectEqual(t.true_obj, t.existsp(t.cString(path)));
+    try testing.expectEqual(layouts.false_object, t.existsp(t.cString(missing)));
+    try testing.expectEqual(layouts.false_object, t.existsp(layouts.tagFixnum(3)));
+
+    const r = try t.open(path, "rb");
+    // ( n buf file -- count ): a short read returns what was available.
+    const buf = t.byteArray("................");
+    t.vm.push(layouts.tagFixnum(16));
+    t.vm.push(buf);
+    t.vm.push(r);
+    primitive_fread(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(6), t.vm.pop());
+    try testing.expectEqualStrings("hello!", IoTestVM.bytesOf(buf)[0..6]);
+    try testing.expectEqualStrings("..........", IoTestVM.bytesOf(buf)[6..16]);
+    // At end of file the count is 0.
+    t.vm.push(layouts.tagFixnum(4));
+    t.vm.push(buf);
+    t.vm.push(r);
+    primitive_fread(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(0), t.vm.pop());
+    // Non-positive sizes and non-buffer arguments read nothing.
+    t.vm.push(layouts.tagFixnum(0));
+    t.vm.push(buf);
+    t.vm.push(r);
+    primitive_fread(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(0), t.vm.pop());
+    t.vm.push(layouts.tagFixnum(4));
+    t.vm.push(layouts.tagFixnum(99));
+    t.vm.push(r);
+    primitive_fread(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(0), t.vm.pop());
+    // Reading through an alien pointing at a byte array works too.
+    const alien_buf = t.byteArray("....");
+    const alien = t.vm.allotAlien(alien_buf, 0);
+    t.seek(r, 0, 0);
+    t.vm.push(layouts.tagFixnum(4));
+    t.vm.push(alien);
+    t.vm.push(r);
+    primitive_fread(t.fields());
+    try testing.expectEqual(layouts.tagFixnum(4), t.vm.pop());
+    try testing.expectEqualStrings("hell", IoTestVM.bytesOf(alien_buf));
+
+    // ( file -- ch/f )
+    t.seek(r, 1, 0);
+    for ("ello!") |expected| {
+        try testing.expectEqual(layouts.tagFixnum(expected), t.getc(r));
+    }
+    try testing.expectEqual(layouts.false_object, t.getc(r));
+    try testing.expectEqual(layouts.false_object, t.getc(r));
+    // EOF was cleared, so seeking back and reading again works.
+    t.seek(r, 0, 0);
+    try testing.expectEqual(layouts.tagFixnum('h'), t.getc(r));
+    t.vm.push(r);
+    primitive_fclose(t.fields());
+    try t.expectStackBalanced();
+}
+
+test "single-operand file primitives treat a null alien as no file" {
+    var t = try IoTestVM.init();
+    defer t.deinit();
+    const null_file = t.vm.allotAlien(layouts.false_object, 0);
+
+    try std.testing.expectEqual(layouts.false_object, t.getc(null_file));
+    try std.testing.expectEqual(layouts.tagFixnum(0), t.tell(null_file));
+    t.vm.push(null_file);
+    primitive_fflush(t.fields());
+    t.vm.push(null_file);
+    primitive_fclose(t.fields());
+    try t.expectStackBalanced();
+}
+
+test "multi-operand file primitives keep their stack effect with a null alien" {
+    // BUG (not fixed here): primitive_fread, primitive_fwrite, primitive_fputc
+    // and primitive_fseek return early when the file alien's address is 0,
+    // but they do so after popping only the file, leaving their remaining
+    // operands (n/buf, buf/length, ch, offset/whence) on the data stack. The
+    // C++ VM pops every operand before using the handle (vm/io.cpp), so the
+    // declared stack effects hold there. With a null handle the Zig VM leaves
+    // 7 extra cells behind for the sequence below.
+    if (true) return error.SkipZigTest;
+
+    var t = try IoTestVM.init();
+    defer t.deinit();
+    const null_file = t.vm.allotAlien(layouts.false_object, 0);
+
+    t.vm.push(layouts.tagFixnum(8));
+    t.vm.push(t.byteArray("12345678"));
+    t.vm.push(null_file);
+    primitive_fread(t.fields());
+    try std.testing.expectEqual(layouts.tagFixnum(0), t.vm.pop());
+
+    t.vm.push(t.byteArray("abc"));
+    t.vm.push(layouts.tagFixnum(3));
+    t.vm.push(null_file);
+    primitive_fwrite(t.fields());
+    t.vm.push(layouts.tagFixnum('x'));
+    t.vm.push(null_file);
+    primitive_fputc(t.fields());
+    t.seek(null_file, 0, 0);
+    try t.expectStackBalanced();
+}

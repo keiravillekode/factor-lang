@@ -987,3 +987,426 @@ pub export fn primitive_callstack_for(vm_asm: *VMAssemblyFields) callconv(.c) vo
 
     vm.replace(tagged);
 }
+
+// --- Tests ---
+
+const testing = std.testing;
+const data_heap_mod = @import("../data_heap.zig");
+const code_heap_mod = @import("../code_heap.zig");
+const free_list_mod = @import("../free_list.zig");
+const write_barrier_mod = @import("../write_barrier.zig");
+const objects_mod = @import("../objects.zig");
+
+// A bare VM with a data heap and a code heap over plain (never executed)
+// memory, enough to drive the code-heap primitives without an image.
+const TestVM = struct {
+    vm: *FactorVM,
+    heap: *data_heap_mod.DataHeap,
+    region: []u8,
+    code_alloc: free_list_mod.FreeListAllocator,
+    code_heap: code_heap_mod.CodeHeap,
+    true_obj: Cell,
+    stack_base: Cell,
+
+    fn init(self: *TestVM) !void {
+        const allocator = testing.allocator;
+        self.vm = try FactorVM.init(allocator);
+        self.vm.vm_asm.ctx = try self.vm.newContext();
+        self.vm.vm_asm.spare_ctx = try self.vm.newContext();
+        self.heap = try data_heap_mod.DataHeap.init(allocator, 256 * 1024, 64 * 1024, 64 * 1024);
+        self.vm.setDataHeap(self.heap);
+
+        const size: Cell = 64 * 1024;
+        self.region = try std.heap.page_allocator.alloc(u8, size);
+        @memset(self.region, 0);
+        const start = @intFromPtr(self.region.ptr);
+        self.code_alloc = free_list_mod.FreeListAllocator.init(allocator, start, size);
+        self.code_heap = code_heap_mod.CodeHeap{
+            .seg = null,
+            .free_list = &self.code_alloc,
+            .safepoint_page = 0,
+            .code_start = start,
+            .code_size = size,
+            .allocator = allocator,
+            .remembered_sets = write_barrier_mod.CodeHeapRememberedSets.init(allocator),
+        };
+        self.vm.code = &self.code_heap;
+
+        // tagBoolean returns the canonical_true special object, which is f in
+        // a bare VM; install a sentinel so t and f differ.
+        self.true_obj = layouts.tagFixnum(0x7472_7565);
+        self.vm.vm_asm.special_objects[@intFromEnum(objects_mod.SpecialObject.canonical_true)] = self.true_obj;
+        self.stack_base = self.vm.vm_asm.ctx.datastack;
+    }
+
+    fn deinit(self: *TestVM) void {
+        self.vm.code = null;
+        self.code_heap.deinit();
+        self.code_alloc.deinit();
+        std.heap.page_allocator.free(self.region);
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fields(self: *TestVM) *VMAssemblyFields {
+        return &self.vm.vm_asm;
+    }
+
+    fn array(self: *TestVM, values: []const Cell) Cell {
+        const tagged = self.vm.allotArray(values.len, layouts.false_object) orelse @panic("allotArray failed");
+        const arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(tagged));
+        @memcpy(arr.data()[0..values.len], values);
+        return tagged;
+    }
+
+    fn bytes(self: *TestVM, data: []const u8) Cell {
+        const tagged = self.vm.allotByteArray(data.len);
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        @memcpy(ba.data()[0..data.len], data);
+        return tagged;
+    }
+
+    fn relocations(self: *TestVM, entries: []const code_blocks.RelocationEntry) Cell {
+        const tagged = self.vm.allotByteArray(entries.len * 4);
+        const ba: *layouts.ByteArray = @ptrFromInt(layouts.UNTAG(tagged));
+        for (entries, 0..) |e, i| {
+            std.mem.writeInt(u32, ba.data()[i * 4 ..][0..4], e.value, .little);
+        }
+        return tagged;
+    }
+
+    fn word(self: *TestVM) Cell {
+        const tagged = self.vm.allotObject(.word, @sizeOf(layouts.Word)) orelse @panic("allotObject failed");
+        const w: *layouts.Word = @ptrFromInt(layouts.UNTAG(tagged));
+        w.hashcode_field = layouts.tagFixnum(0);
+        w.name = layouts.false_object;
+        w.vocabulary = layouts.false_object;
+        w.def = layouts.false_object;
+        w.props = layouts.false_object;
+        w.pic_def = layouts.false_object;
+        w.pic_tail_def = layouts.false_object;
+        w.subprimitive = layouts.false_object;
+        w.entry_point = 0;
+        return tagged;
+    }
+
+    fn wordPtr(tagged: Cell) *layouts.Word {
+        return @ptrFromInt(layouts.UNTAG(tagged));
+    }
+
+    // Optimized-code payload as modify-code-heap expects it:
+    // { parameters literals relocation labels code frame-size }
+    fn payload(self: *TestVM, literals: Cell, relocation: Cell, labels: Cell, code_len: usize, frame_size: Fixnum) Cell {
+        const code = self.vm.allotByteArray(code_len);
+        return self.array(&.{ layouts.false_object, literals, relocation, labels, code, layouts.tagFixnum(frame_size) });
+    }
+
+    fn modifyCodeHeap(self: *TestVM, alist: Cell, update_existing: bool, reset_caches: bool) void {
+        self.vm.push(alist);
+        self.vm.push(if (update_existing) self.true_obj else layouts.false_object);
+        self.vm.push(if (reset_caches) self.true_obj else layouts.false_object);
+        primitive_modify_code_heap(self.fields());
+    }
+
+    fn blockOf(self: *TestVM, word_cell: Cell) *CodeBlock {
+        const w = wordPtr(word_cell);
+        return self.code_heap.codeBlockForAddress(w.entry_point) orelse @panic("word has no code block");
+    }
+
+    fn expectStackBalanced(self: *TestVM) !void {
+        try testing.expectEqual(self.stack_base, self.vm.vm_asm.ctx.datastack);
+    }
+};
+
+test "modify_code_heap installs optimized code, relocations and label fixups" {
+    var t: TestVM = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const w = t.word();
+    const literals = t.array(&.{ layouts.tagFixnum(42), layouts.tagFixnum(0x1234), layouts.tagFixnum(8) });
+    const reloc = t.relocations(&.{
+        code_blocks.RelocationEntry.init(.literal, .absolute_cell, 8),
+        code_blocks.RelocationEntry.init(.this, .absolute_cell, 16),
+        code_blocks.RelocationEntry.init(.untagged, .absolute_2, 18),
+        code_blocks.RelocationEntry.init(.here, .relative, 24),
+        code_blocks.RelocationEntry.init(.cards_offset, .absolute_cell, 32),
+    });
+    // One label fixup: a relative 32-bit field ending at offset 40 that must
+    // point at offset 4 of the block.
+    const labels = t.array(&.{ layouts.tagFixnum(@intFromEnum(code_blocks.RelocationClass.relative)), layouts.tagFixnum(40), layouts.tagFixnum(4) });
+    const pair = t.array(&.{ w, t.payload(literals, reloc, labels, 40, 32) });
+    const alist = t.array(&.{pair});
+
+    t.modifyCodeHeap(alist, false, false);
+    try t.expectStackBalanced();
+
+    const word = TestVM.wordPtr(w);
+    try testing.expect(word.entry_point != 0);
+    const block = t.blockOf(w);
+    try testing.expectEqual(word.entry_point, block.entryPoint());
+    try testing.expectEqual(w, block.owner);
+    try testing.expectEqual(code_blocks.CodeBlockType.optimized, block.blockType());
+    try testing.expectEqual(@as(Cell, 32), block.stackFrameSize());
+    try testing.expectEqual(@as(Cell, @sizeOf(CodeBlock) + 48), block.size());
+    try testing.expectEqual(reloc, block.relocation);
+    try testing.expectEqual(layouts.false_object, block.parameters);
+
+    // Relocations were applied once every entry point was set.
+    const entry = block.entryPoint();
+    const cells: [*]const Cell = @ptrFromInt(entry);
+    try testing.expectEqual(layouts.tagFixnum(42), cells[0]);
+    try testing.expectEqual(entry, cells[1]);
+    try testing.expectEqual(@as(u16, 0x1234), @as(*align(1) const u16, @ptrFromInt(entry + 16)).*);
+    try testing.expectEqual(@as(i32, 8), @as(*align(1) const i32, @ptrFromInt(entry + 20)).*);
+    try testing.expectEqual(t.vm.vm_asm.cards_offset, cells[3]);
+    // The label fixup: (entry + 4) - (entry + 40).
+    try testing.expectEqual(@as(i32, -36), @as(*align(1) const i32, @ptrFromInt(entry + 36)).*);
+
+    // Bookkeeping: initialized, tracked, scannable for literals, remembered.
+    try testing.expectEqual(@as(usize, 0), t.code_heap.uninitialized_blocks.count());
+    try testing.expect(t.code_heap.blockHasLiterals(block));
+    try testing.expect(!t.code_heap.blockHasCodePointers(block));
+    try testing.expect(t.code_heap.remembered_sets.hasAny());
+
+    // word-optimized? sees the optimized block.
+    t.vm.push(w);
+    primitive_word_optimized_p(t.fields());
+    try testing.expectEqual(t.true_obj, t.vm.pop());
+    try t.expectStackBalanced();
+
+    // code-blocks lists the block's six fields.
+    primitive_code_blocks(t.fields());
+    const listing = t.vm.pop();
+    try testing.expect(layouts.hasTag(listing, .array));
+    const arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(listing));
+    try testing.expectEqual(@as(Cell, 6), arr.getCapacity());
+    try testing.expectEqual(w, arr.data()[0]);
+    try testing.expectEqual(layouts.false_object, arr.data()[1]);
+    try testing.expectEqual(reloc, arr.data()[2]);
+    try testing.expectEqual(layouts.tagFixnum(1), arr.data()[3]);
+    try testing.expectEqual(layouts.tagFixnum(@intCast(block.size())), arr.data()[4]);
+    try testing.expectEqual(entry, arr.data()[5]);
+    try t.expectStackBalanced();
+
+    // An empty compilation unit is a no-op.
+    t.modifyCodeHeap(t.array(&.{}), true, true);
+    try t.expectStackBalanced();
+    try testing.expectEqual(word.entry_point, entry);
+}
+
+test "modify_code_heap with update-existing-words repoints callers" {
+    var t: TestVM = undefined;
+    try t.init();
+    defer t.deinit();
+
+    // Compile W with trivial code.
+    const w = t.word();
+    const empty_reloc = t.vm.allotByteArray(0);
+    t.modifyCodeHeap(t.array(&.{t.array(&.{ w, t.payload(t.array(&.{}), empty_reloc, layouts.false_object, 16, 0) })}), false, false);
+    const w_entry_1 = TestVM.wordPtr(w).entry_point;
+    try testing.expect(w_entry_1 != 0);
+    // An empty relocation byte array is normalized to f.
+    try testing.expectEqual(layouts.false_object, t.blockOf(w).relocation);
+
+    // Compile V, which calls W through an absolute entry-point operand.
+    const v = t.word();
+    const v_reloc = t.relocations(&.{code_blocks.RelocationEntry.init(.entry_point, .absolute_cell, 8)});
+    t.modifyCodeHeap(t.array(&.{t.array(&.{ v, t.payload(t.array(&.{w}), v_reloc, layouts.false_object, 16, 0) })}), false, false);
+    const v_block = t.blockOf(v);
+    const v_cells: [*]const Cell = @ptrFromInt(v_block.entryPoint());
+    try testing.expectEqual(w_entry_1, v_cells[0]);
+    try testing.expect(t.code_heap.blockHasCodePointers(v_block));
+
+    // Recompile W with update-existing-words: V's call site follows.
+    t.modifyCodeHeap(t.array(&.{t.array(&.{ w, t.payload(t.array(&.{}), empty_reloc, layouts.false_object, 24, 16) })}), true, false);
+    const w_entry_2 = TestVM.wordPtr(w).entry_point;
+    try testing.expect(w_entry_2 != w_entry_1);
+    try testing.expectEqual(w_entry_2, v_cells[0]);
+    try testing.expectEqual(@as(usize, 0), t.code_heap.uninitialized_blocks.count());
+    try t.expectStackBalanced();
+
+    // Without update-existing-words a recompile leaves callers alone.
+    t.modifyCodeHeap(t.array(&.{t.array(&.{ w, t.payload(t.array(&.{}), empty_reloc, layouts.false_object, 16, 0) })}), false, false);
+    const w_entry_3 = TestVM.wordPtr(w).entry_point;
+    try testing.expect(w_entry_3 != w_entry_2);
+    try testing.expectEqual(w_entry_2, v_cells[0]);
+    try t.expectStackBalanced();
+
+    // Every compiled block is still tracked.
+    t.code_heap.flushPending();
+    try testing.expectEqual(@as(usize, 4), t.code_heap.all_blocks_sorted.items.len);
+    t.code_heap.verifyAllBlocksSet();
+}
+
+test "array_to_quotation and quotation_compiled_p" {
+    var t: TestVM = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const arr = t.array(&.{ layouts.tagFixnum(1), layouts.tagFixnum(2) });
+    t.vm.push(arr);
+    primitive_array_to_quotation(t.fields());
+    const quot_cell = t.vm.pop();
+    try testing.expect(layouts.hasTag(quot_cell, .quotation));
+    const quot: *layouts.Quotation = @ptrFromInt(layouts.UNTAG(quot_cell));
+    try testing.expectEqual(arr, quot.array);
+    try testing.expectEqual(layouts.false_object, quot.cached_effect);
+    try testing.expectEqual(layouts.false_object, quot.cache_counter);
+    // No lazy-jit-compile word is installed, so the stub entry point is 0.
+    try testing.expectEqual(t.vm.lazyJitCompileEntryPoint(), quot.entry_point);
+
+    t.vm.push(quot_cell);
+    primitive_quotation_compiled_p(t.fields());
+    try testing.expectEqual(layouts.false_object, t.vm.pop());
+
+    quot.entry_point = 0x1000;
+    t.vm.push(quot_cell);
+    primitive_quotation_compiled_p(t.fields());
+    try testing.expectEqual(t.true_obj, t.vm.pop());
+
+    // A quotation whose entry point is the lazy stub is not compiled.
+    const lazy_word = t.word();
+    TestVM.wordPtr(lazy_word).entry_point = 0x1000;
+    t.vm.vm_asm.special_objects[@intFromEnum(objects_mod.SpecialObject.lazy_jit_compile_word)] = lazy_word;
+    try testing.expectEqual(@as(Cell, 0x1000), t.vm.lazyJitCompileEntryPoint());
+    t.vm.push(quot_cell);
+    primitive_quotation_compiled_p(t.fields());
+    try testing.expectEqual(layouts.false_object, t.vm.pop());
+
+    // Non-quotations are never compiled.
+    t.vm.push(arr);
+    primitive_quotation_compiled_p(t.fields());
+    try testing.expectEqual(layouts.false_object, t.vm.pop());
+    try t.expectStackBalanced();
+}
+
+test "objectClass, lookup_method and tuple echelon dispatch" {
+    var t: TestVM = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const fixnum_method = t.word();
+    const array_method = t.word();
+    const hashed_method = t.word();
+    const direct_method = t.word();
+    const superclass = t.word();
+
+    // Tuple layout: klass, size, echelon, then (superclass, hashcode) pairs.
+    // The hashcode picks bucket 6 & 3 = 2 of a 4-bucket table.
+    const layout = t.array(&.{ layouts.false_object, layouts.tagFixnum(0), layouts.tagFixnum(0), superclass, layouts.tagFixnum(6) });
+    const tuple_cell = t.vm.allotObject(.tuple, @sizeOf(layouts.Tuple)) orelse unreachable;
+    const tuple: *layouts.Tuple = @ptrFromInt(layouts.UNTAG(tuple_cell));
+    tuple.layout = layout;
+
+    try testing.expectEqual(layouts.tagFixnum(0), objectClass(layouts.tagFixnum(99)));
+    try testing.expectEqual(layouts.tagFixnum(@intFromEnum(layouts.TypeTag.array)), objectClass(layout));
+    try testing.expectEqual(layout, objectClass(tuple_cell));
+
+    // A method table indexed by type tag; the tuple slot holds echelons.
+    var methods_values = [_]Cell{layouts.false_object} ** 16;
+    methods_values[@intFromEnum(layouts.TypeTag.fixnum)] = fixnum_method;
+    methods_values[@intFromEnum(layouts.TypeTag.array)] = array_method;
+    const alist = t.array(&.{ superclass, hashed_method });
+    const buckets = t.array(&.{ layouts.false_object, layouts.false_object, alist, layouts.false_object });
+    const echelons = t.array(&.{buckets});
+    methods_values[@intFromEnum(layouts.TypeTag.tuple)] = echelons;
+    const methods = t.array(&methods_values);
+
+    const fix = lookupMethodAndClass(layouts.tagFixnum(5), methods);
+    try testing.expectEqual(fixnum_method, fix.method);
+    try testing.expectEqual(layouts.tagFixnum(0), fix.klass);
+    try testing.expectEqual(array_method, lookupMethod(layout, methods));
+
+    const tup = lookupMethodAndClass(tuple_cell, methods);
+    try testing.expectEqual(hashed_method, tup.method);
+    try testing.expectEqual(layout, tup.klass);
+
+    // A bucket holding a method directly, without an alist.
+    const direct_buckets = t.array(&.{ layouts.false_object, layouts.false_object, direct_method, layouts.false_object });
+    const echelons_arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(echelons));
+    echelons_arr.data()[0] = direct_buckets;
+    try testing.expectEqual(direct_method, lookupMethod(tuple_cell, methods));
+
+    // An echelon slot holding a word applies to every class of that echelon.
+    echelons_arr.data()[0] = array_method;
+    try testing.expectEqual(array_method, lookupMethod(tuple_cell, methods));
+
+    // A layout deeper than the table walks down to the last echelon, and an
+    // f echelon is skipped.
+    const layout_arr: *layouts.Array = @ptrFromInt(layouts.UNTAG(layout));
+    layout_arr.data()[2] = layouts.tagFixnum(3);
+    const two_echelons = t.array(&.{ buckets, layouts.false_object });
+    methods_values[@intFromEnum(layouts.TypeTag.tuple)] = two_echelons;
+    const methods2 = t.array(&methods_values);
+    try testing.expectEqual(hashed_method, lookupMethod(tuple_cell, methods2));
+
+    // A non-array tuple slot is used as the method for all tuples.
+    methods_values[@intFromEnum(layouts.TypeTag.tuple)] = direct_method;
+    const methods3 = t.array(&methods_values);
+    try testing.expectEqual(direct_method, lookupMethod(tuple_cell, methods3));
+
+    // The primitive pops object and methods and pushes the method.
+    t.vm.push(tuple_cell);
+    t.vm.push(methods2);
+    primitive_lookup_method(t.fields());
+    try testing.expectEqual(hashed_method, t.vm.pop());
+    try t.expectStackBalanced();
+}
+
+test "mega_cache_miss looks up and caches the method" {
+    var t: TestVM = undefined;
+    try t.init();
+    defer t.deinit();
+
+    const fixnum_method = t.word();
+    const superclass = t.word();
+    const tuple_method = t.word();
+    const layout = t.array(&.{ layouts.false_object, layouts.tagFixnum(0), layouts.tagFixnum(0), superclass, layouts.tagFixnum(1) });
+    const tuple_cell = t.vm.allotObject(.tuple, @sizeOf(layouts.Tuple)) orelse unreachable;
+    @as(*layouts.Tuple, @ptrFromInt(layouts.UNTAG(tuple_cell))).layout = layout;
+
+    var methods_values = [_]Cell{layouts.false_object} ** 16;
+    methods_values[@intFromEnum(layouts.TypeTag.fixnum)] = fixnum_method;
+    const buckets = t.array(&.{ layouts.false_object, t.array(&.{ superclass, tuple_method }) });
+    methods_values[@intFromEnum(layouts.TypeTag.tuple)] = t.array(&.{buckets});
+    const methods = t.array(&methods_values);
+
+    // A 4-entry (klass, method) cache.
+    var cache_values = [_]Cell{layouts.false_object} ** 8;
+    const cache = t.array(&cache_values);
+    const cache_arr: *const layouts.Array = @ptrFromInt(layouts.UNTAG(cache));
+    const misses_before = t.vm.dispatch_stats.megamorphic_cache_misses;
+
+    // The dispatched object is `index` cells below the top of the stack
+    // after the three arguments are popped.
+    t.vm.push(layouts.tagFixnum(5));
+    t.vm.push(methods);
+    t.vm.push(layouts.tagFixnum(0));
+    t.vm.push(cache);
+    primitive_mega_cache_miss(t.fields());
+    try testing.expectEqual(fixnum_method, t.vm.pop());
+    try testing.expectEqual(layouts.tagFixnum(5), t.vm.pop());
+    try testing.expectEqual(misses_before + 1, t.vm.dispatch_stats.megamorphic_cache_misses);
+    // klass fixnum-tag 0 hashes to slot 0.
+    try testing.expectEqual(layouts.tagFixnum(0), cache_arr.data()[0]);
+    try testing.expectEqual(fixnum_method, cache_arr.data()[1]);
+
+    // A tuple with something under it on the stack: index 1.
+    t.vm.push(tuple_cell);
+    t.vm.push(layouts.tagFixnum(7));
+    t.vm.push(methods);
+    t.vm.push(layouts.tagFixnum(1));
+    t.vm.push(cache);
+    primitive_mega_cache_miss(t.fields());
+    try testing.expectEqual(tuple_method, t.vm.pop());
+    try testing.expectEqual(layouts.tagFixnum(7), t.vm.pop());
+    try testing.expectEqual(tuple_cell, t.vm.pop());
+    const slot = ((layout >> layouts.tag_bits) & 3) << 1;
+    try testing.expectEqual(layout, cache_arr.data()[slot]);
+    try testing.expectEqual(tuple_method, cache_arr.data()[slot + 1]);
+    try testing.expectEqual(misses_before + 2, t.vm.dispatch_stats.megamorphic_cache_misses);
+    try t.expectStackBalanced();
+}

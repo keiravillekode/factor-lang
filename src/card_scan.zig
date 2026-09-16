@@ -406,3 +406,258 @@ fn scanEmbeddedLiterals(
         block.flushIcache();
     }
 }
+
+// --- Tests ---
+
+const CardScanFixture = struct {
+    vm: *vm_mod.FactorVM,
+    heap: *data_heap_mod.DataHeap,
+    gc: GC,
+
+    fn init(self: *CardScanFixture) !void {
+        const allocator = std.testing.allocator;
+        self.vm = try vm_mod.FactorVM.init(allocator);
+        self.vm.vm_asm.ctx = try self.vm.newContext();
+        self.vm.vm_asm.spare_ctx = try self.vm.newContext();
+        self.heap = try data_heap_mod.DataHeap.init(allocator, 4096, 4096, 8192);
+        self.vm.setDataHeap(self.heap);
+        self.gc = GC.init(allocator, self.vm, self.heap);
+    }
+
+    fn deinit(self: *CardScanFixture) void {
+        self.gc.deinit();
+        self.heap.deinit();
+        self.vm.cards_array = null;
+        self.vm.decks_array = null;
+        self.vm.deinit();
+    }
+
+    fn fillArray(addr: Cell, capacity: Cell) *layouts.Array {
+        const arr: *layouts.Array = @ptrFromInt(addr);
+        arr.header = @as(Cell, @intFromEnum(layouts.TypeTag.array)) << 2;
+        arr.capacity = layouts.tagFixnum(@intCast(capacity));
+        @memset(arr.data()[0..capacity], layouts.false_object);
+        return arr;
+    }
+
+    fn arraySize(capacity: Cell) Cell {
+        return layouts.alignCell(@sizeOf(layouts.Array) + capacity * @sizeOf(Cell), layouts.data_alignment);
+    }
+
+    fn nurseryArray(self: *CardScanFixture, capacity: Cell) !*layouts.Array {
+        const addr = self.heap.allocateNursery(arraySize(capacity)) orelse return error.OutOfMemory;
+        return fillArray(addr, capacity);
+    }
+
+    fn tenuredArray(self: *CardScanFixture, capacity: Cell) !*layouts.Array {
+        const addr = self.heap.allocateTenured(arraySize(capacity)) orelse return error.OutOfMemory;
+        return fillArray(addr, capacity);
+    }
+
+    fn tagged(arr: *layouts.Array) Cell {
+        return @intFromPtr(arr) | @intFromEnum(layouts.TypeTag.array);
+    }
+
+    fn cardByte(self: *CardScanFixture, slot: *Cell) *u8 {
+        return @ptrFromInt(self.vm.vm_asm.cards_offset +% (@intFromPtr(slot) >> @intCast(vm_mod.card_bits)));
+    }
+
+    fn deckByte(self: *CardScanFixture, slot: *Cell) *u8 {
+        return @ptrFromInt(self.vm.vm_asm.decks_offset +% (@intFromPtr(slot) >> @intCast(vm_mod.deck_bits)));
+    }
+
+    fn nurseryToAging(self: *CardScanFixture) slot_visitor.CopyingDestination {
+        return .{
+            .bump_here = &self.heap.aging.here,
+            .bump_end = self.heap.aging.end,
+            .bump_object_start = &self.heap.aging.object_start,
+            .source_start = self.heap.nursery.start,
+            .source_end = self.heap.nursery.end,
+        };
+    }
+
+    fn inAging(self: *CardScanFixture, tagged_value: Cell) bool {
+        const addr = layouts.UNTAG(tagged_value);
+        return addr >= self.heap.aging.start and addr < self.heap.aging.here;
+    }
+
+    fn scanTenured(self: *CardScanFixture, dest: *slot_visitor.CopyingDestination) void {
+        const mask = write_barrier.card_points_to_nursery;
+        scanCards(&self.gc, &self.heap.tenured, mask, mask, dest, 0, 0);
+    }
+};
+
+test "card scan only visits cards marked by the write barrier" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    // Large arrays come from the large-block path, so they are laid out
+    // sequentially and land in different cards.
+    const n1 = try f.nurseryArray(1);
+    const n2 = try f.nurseryArray(1);
+    const t1 = try f.tenuredArray(200);
+    const t2 = try f.tenuredArray(200);
+    try std.testing.expect(@intFromPtr(t1) >> @intCast(vm_mod.card_bits) != @intFromPtr(t2) >> @intCast(vm_mod.card_bits));
+
+    t1.data()[0] = CardScanFixture.tagged(n1);
+    t2.data()[0] = CardScanFixture.tagged(n2);
+    f.vm.writeBarrier(&t1.data()[0]);
+    const card1 = f.cardByte(&t1.data()[0]);
+    const card2 = f.cardByte(&t2.data()[0]);
+    try std.testing.expect(card1.* & write_barrier.card_points_to_nursery != 0);
+    try std.testing.expect(card2.* & write_barrier.card_points_to_nursery == 0);
+
+    var dest = f.nurseryToAging();
+    f.scanTenured(&dest);
+    try std.testing.expect(!dest.allocation_failed);
+
+    // t1's slot now points at the aging copy and n1 was forwarded.
+    try std.testing.expect(f.inAging(t1.data()[0]));
+    const n1_obj: *layouts.Object = @ptrCast(n1);
+    try std.testing.expect(n1_obj.isForwardingPointer());
+    try std.testing.expectEqual(@intFromPtr(n1_obj.forwardingPointer()), layouts.UNTAG(t1.data()[0]));
+    try std.testing.expect(card1.* & write_barrier.card_points_to_nursery == 0);
+
+    // t2's card was never marked, so its slot still points into the nursery.
+    try std.testing.expectEqual(CardScanFixture.tagged(n2), t2.data()[0]);
+    const n2_obj: *layouts.Object = @ptrCast(n2);
+    try std.testing.expect(!n2_obj.isForwardingPointer());
+    try std.testing.expectEqual(CardScanFixture.arraySize(1), f.heap.aging.here - f.heap.aging.start);
+}
+
+test "card scan skips cards whose deck byte is clear" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n1 = try f.nurseryArray(1);
+    const t1 = try f.tenuredArray(200);
+    t1.data()[0] = CardScanFixture.tagged(n1);
+    f.vm.writeBarrier(&t1.data()[0]);
+    const card = f.cardByte(&t1.data()[0]);
+    const deck = f.deckByte(&t1.data()[0]);
+    try std.testing.expect(deck.* & write_barrier.card_points_to_nursery != 0);
+
+    // Clearing the deck byte hides the dirty card from the scan.
+    const saved_deck = deck.*;
+    deck.* = 0;
+    var dest = f.nurseryToAging();
+    f.scanTenured(&dest);
+    try std.testing.expectEqual(CardScanFixture.tagged(n1), t1.data()[0]);
+    try std.testing.expect(card.* & write_barrier.card_points_to_nursery != 0);
+
+    // Restoring it makes the next scan process the card.
+    deck.* = saved_deck;
+    f.scanTenured(&dest);
+    try std.testing.expect(f.inAging(t1.data()[0]));
+    try std.testing.expect(card.* & write_barrier.card_points_to_nursery == 0);
+    try std.testing.expect(deck.* & write_barrier.card_points_to_nursery == 0);
+}
+
+test "card scan precise aging mode records whether a card still points to aging" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n1 = try f.nurseryArray(1);
+    const t1 = try f.tenuredArray(200);
+    const t2 = try f.tenuredArray(200);
+    t1.data()[0] = CardScanFixture.tagged(n1);
+    t2.data()[0] = layouts.tagFixnum(5);
+    f.vm.writeBarrier(&t1.data()[0]);
+    f.vm.writeBarrier(&t2.data()[0]);
+    const card1 = f.cardByte(&t1.data()[0]);
+    const card2 = f.cardByte(&t2.data()[0]);
+
+    var dest = f.nurseryToAging();
+    const mask = write_barrier.card_points_to_nursery;
+    scanCards(&f.gc, &f.heap.tenured, mask, mask, &dest, f.heap.aging.start, f.heap.aging.end);
+
+    // The copied object lives in aging, so t1's card is exactly "points to aging".
+    try std.testing.expect(f.inAging(t1.data()[0]));
+    try std.testing.expectEqual(write_barrier.card_points_to_aging, card1.*);
+    // t2 only holds an immediate: its card is fully cleared.
+    try std.testing.expectEqual(layouts.tagFixnum(5), t2.data()[0]);
+    try std.testing.expectEqual(@as(u8, 0), card2.*);
+}
+
+test "card scan steps over a free block in front of the object" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n1 = try f.nurseryArray(1);
+    const t1 = try f.tenuredArray(200);
+    const t2 = try f.tenuredArray(200);
+    // Turn t1 into a free block spanning its old size.
+    const t1_size = CardScanFixture.arraySize(200);
+    const t1_header: *Cell = @ptrCast(t1);
+    t1_header.* = t1_size | 1;
+
+    t2.data()[0] = CardScanFixture.tagged(n1);
+    f.vm.writeBarrier(&t2.data()[0]);
+    const card = f.cardByte(&t2.data()[0]);
+
+    var dest = f.nurseryToAging();
+    f.scanTenured(&dest);
+    try std.testing.expect(f.inAging(t2.data()[0]));
+    try std.testing.expect(card.* & write_barrier.card_points_to_nursery == 0);
+    // The free block itself is untouched.
+    try std.testing.expectEqual(t1_size | 1, t1_header.*);
+}
+
+test "card scan updates every dirty slot of several objects in one card" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n1 = try f.nurseryArray(1);
+    const n2 = try f.nurseryArray(1);
+    // Small arrays are carved from one 1KB page, so both sit in the same card.
+    const t1 = try f.tenuredArray(1);
+    const t2 = try f.tenuredArray(1);
+    try std.testing.expectEqual(@intFromPtr(t1) >> @intCast(vm_mod.card_bits), @intFromPtr(t2) >> @intCast(vm_mod.card_bits));
+
+    t1.data()[0] = CardScanFixture.tagged(n1);
+    t2.data()[0] = CardScanFixture.tagged(n2);
+    f.vm.writeBarrier(&t1.data()[0]);
+    f.vm.writeBarrier(&t2.data()[0]);
+
+    var dest = f.nurseryToAging();
+    f.scanTenured(&dest);
+    try std.testing.expect(f.inAging(t1.data()[0]));
+    try std.testing.expect(f.inAging(t2.data()[0]));
+    try std.testing.expect(t1.data()[0] != t2.data()[0]);
+    try std.testing.expect(f.cardByte(&t1.data()[0]).* & write_barrier.card_points_to_nursery == 0);
+    // Two objects were copied into aging, back to back.
+    try std.testing.expectEqual(2 * CardScanFixture.arraySize(1), f.heap.aging.here - f.heap.aging.start);
+}
+
+test "card scan with a clean card table copies nothing" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const n1 = try f.nurseryArray(1);
+    const t1 = try f.tenuredArray(200);
+    t1.data()[0] = CardScanFixture.tagged(n1);
+    // No write barrier: the reference is invisible to the card scan.
+    var dest = f.nurseryToAging();
+    f.scanTenured(&dest);
+    try std.testing.expectEqual(CardScanFixture.tagged(n1), t1.data()[0]);
+    try std.testing.expectEqual(f.heap.aging.start, f.heap.aging.here);
+}
+
+test "code heap root scans are no-ops without a code heap" {
+    var f: CardScanFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var dest = f.nurseryToAging();
+    scanCodeHeapRoots(&f.gc, &dest, .nursery);
+    scanCodeHeapRoots(&f.gc, &dest, .aging);
+    scanCodeHeapRoots(&f.gc, &dest, .both);
+    scanAllCodeBlocksForCopy(&f.gc, &dest);
+    try std.testing.expectEqual(f.heap.aging.start, f.heap.aging.here);
+    try std.testing.expect(!dest.allocation_failed);
+}

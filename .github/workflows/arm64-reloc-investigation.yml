@@ -59,6 +59,8 @@ jobs:
       run: |
         curl -sSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | tar xJ -C "$RUNNER_TEMP"
         echo "$RUNNER_TEMP/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
+    - name: build FFI test library (compiler.tests.alien needs it)
+      run: make -j4 factor-ffi-test CONFIG=vm/Config.linux.arm.64 && ls -la libfactor-ffi-test.so
     - name: build Zig VM (Debug)
       run: zig version && zig build && ls -la factor
     - name: zig unit tests

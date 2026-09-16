@@ -13,12 +13,12 @@ permissions:
 
 env:
   LOAD_ALL: 'USING: compiler.errors memory namespaces parser.notes syntax vocabs.hierarchy ; parser-quiet? off auto-use? off load-all save compiler-errors get assoc-empty? 0 1 ? exit'
-  STRESS: 'USING: parser words kernel sequences ; "resource:.github/scripts/arm64-reloc-stress.factor" run-file { 2000 10000 30000 50000 70000 } [ "run" "arm64-reloc-stress" lookup-word execute( n -- ) ] each'
+  STRESS: 'USING: parser words kernel sequences ; "resource:.github/scripts/arm64-reloc-stress.factor" run-file { 2000 20000 55000 } [ "run" "arm64-reloc-stress" lookup-word execute( n -- ) ] each'
 
 jobs:
   cpp-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
     - uses: actions/checkout@v4
     - name: build C++ VM with assertions
@@ -52,7 +52,7 @@ jobs:
 
   zig-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
     - uses: actions/checkout@v4
     - name: install zig

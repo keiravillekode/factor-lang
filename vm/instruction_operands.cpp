@@ -80,8 +80,9 @@ void instruction_operand::store_value(fixnum absolute_value) {
       store_value_masked(relative_value + 4, rel_arm_b_mask, 0, 2);
       break;
     case RC_RELATIVE_ARM_B_COND_LDR:
-      FACTOR_ASSERT(relative_value + 4 < 0x2000000);
-      FACTOR_ASSERT(relative_value + 4 >= -0x2000000);
+      // imm19 << 2: the field spans +-1MB, not the +-32MB previously asserted.
+      FACTOR_ASSERT(relative_value + 4 < 0x100000);
+      FACTOR_ASSERT(relative_value + 4 >= -0x100000);
       FACTOR_ASSERT((relative_value & 3) == 0);
       store_value_masked(relative_value + 4, rel_arm_b_cond_ldr_mask, 5, 2);
       break;

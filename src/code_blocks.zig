@@ -515,8 +515,9 @@ pub const InstructionOperand = struct {
             },
             .relative_arm_b_cond_ldr => {
                 const adjusted = relative_value + 4;
-                std.debug.assert(adjusted < 0x2000000);
-                std.debug.assert(adjusted >= -0x2000000);
+                // imm19 << 2: the field spans +-1MB, not the +-32MB previously asserted.
+                std.debug.assert(adjusted < 0x100000);
+                std.debug.assert(adjusted >= -0x100000);
                 std.debug.assert((adjusted & 3) == 0);
 
                 self.storeValueMasked(adjusted, rel_arm_b_cond_ldr_mask, 5, 2);
@@ -1035,4 +1036,38 @@ test "relocation entry" {
     try std.testing.expectEqual(RelocationType.entry_point, entry.getType());
     try std.testing.expectEqual(RelocationClass.relative, entry.getClass());
     try std.testing.expectEqual(@as(u24, 0x1234), entry.getOffset());
+}
+
+test "ARM branch relocations round trip at their field limits" {
+    // A minimal code block in aligned memory: header followed by 4 cells of
+    // "code". The operand sits at offset 8, so its 32-bit instruction word
+    // occupies bytes 4..8 of the code.
+    var buf: [@sizeOf(CodeBlock) / @sizeOf(Cell) + 4]Cell align(16) = .{0} ** (@sizeOf(CodeBlock) / @sizeOf(Cell) + 4);
+    const block: *CodeBlock = @ptrCast(&buf);
+    block.initialize(.optimized, buf.len * @sizeOf(Cell), 0);
+    const entry = block.entryPoint();
+    const word_ptr: *align(1) u32 = @ptrFromInt(entry + 8 - 4);
+
+    // B.cond / CBZ / LDR literal: imm19 << 2, measured from the instruction
+    // start (pointer - 4), so the field holds (target - pointer + 4) / 4 and
+    // spans -0x100000 .. 0xFFFFC. The two extreme displacements below used to
+    // be accepted by a +-32MB assert and silently truncated one step further.
+    for ([_]i64{ 0, 4, -4, 0x1000, -0x1000, 0xF_FFF8, -0x10_0004 }) |d| {
+        word_ptr.* = 0x5400_0001; // B.NE with a zero immediate
+        var op = InstructionOperand.init(RelocationEntry.init(.here, .relative_arm_b_cond_ldr, 8), block, 0);
+        const target: i64 = @as(i64, @intCast(entry + 8)) + d;
+        op.storeValue(target);
+        try std.testing.expectEqual(target, op.loadValue());
+        try std.testing.expectEqual(@as(u32, 0x5400_0001), word_ptr.* & ~rel_arm_b_cond_ldr_mask);
+    }
+
+    // B / BL: imm26 << 2, spanning -0x8000000 .. 0x7FFFFFC.
+    for ([_]i64{ 0, 4, -4, 0x1000, -0x1000, 0x7FF_FFF8, -0x800_0004 }) |d| {
+        word_ptr.* = 0x9400_0000; // BL with a zero immediate
+        var op = InstructionOperand.init(RelocationEntry.init(.entry_point, .relative_arm_b, 8), block, 0);
+        const target: i64 = @as(i64, @intCast(entry + 8)) + d;
+        op.storeValue(target);
+        try std.testing.expectEqual(target, op.loadValue());
+        try std.testing.expectEqual(@as(u32, 0x9400_0000), word_ptr.* & ~rel_arm_b_mask);
+    }
 }

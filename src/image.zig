@@ -1386,8 +1386,9 @@ fn storeRelocValue(pointer: Cell, rel_class: RelocationClass, value: Cell) void 
         .relative_arm_b_cond_ldr => {
             const abs_val = @as(isize, @bitCast(value));
             const rel_val = abs_val - @as(isize, @bitCast(pointer));
-            std.debug.assert(rel_val + 4 < 0x2000000);
-            std.debug.assert(rel_val + 4 >= -0x2000000);
+            // imm19 << 2: the field spans +-1MB, not the +-32MB previously asserted.
+            std.debug.assert(rel_val + 4 < 0x100000);
+            std.debug.assert(rel_val + 4 >= -0x100000);
             std.debug.assert((rel_val & 3) == 0);
             storeRelocValueMasked(pointer, rel_val + 4, rel_arm_b_cond_ldr_mask, 5, 2);
         },

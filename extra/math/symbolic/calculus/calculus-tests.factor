@@ -357,3 +357,7 @@ PRIVATE>
 { "e" } [ symbolic[ 1 1 x / + x ^ ] x-sym symbolic[ inf ] limit expr>string ] unit-test
 ! Not indeterminate: the exponent tends to 0
 { 1 } [ symbolic[ 1 5 x * sin + x 7 / ^ ] x-sym 0 limit ] unit-test
+
+! A fractional power at the zero bound, which needs 0^(3/2) to fold
+{ 2/3 } [ symbolic[ x sqrt ] x-sym 0 1 definite-integrate ] unit-test
+{ 2/5 } [ symbolic[ x 3/2 ^ ] x-sym 0 1 definite-integrate ] unit-test

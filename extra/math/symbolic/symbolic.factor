@@ -339,6 +339,11 @@ DEFER: s+
         ] }
         { [ base float? exponent number? and ] [ base exponent ^ ] }
         { [ base number? exponent float? and ] [ base exponent ^ ] }
+        ! 0^p is 0 for positive p, including the ratio exponents that
+        ! the integer case above does not fold. Floats are handled by the
+        ! clauses above, so 0.0^p stays a float; negative powers of 0 are
+        ! left unevaluated
+        { [ base 0 number= exponent real? and [ exponent 0 > ] [ f ] if ] [ 0 ] }
         { [ base e-expr = ] [ exponent sexp ] }
         { [ base pow? exponent integer? and ] [
             base base>> base exponent>> exponent s* s^

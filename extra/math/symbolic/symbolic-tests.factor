@@ -158,3 +158,12 @@ IN: math.symbolic.tests
 { "gamma(-1/2)" } [ symbolic[ 1 2 / neg gamma ] expr>string ] unit-test
 { t } [ symbolic[ 5.5 gamma ] 52.34277778455352 1e-6 ~ ] unit-test
 { t } [ symbolic[ 4 gamma ] evalf 6.0 1e-9 ~ ] unit-test
+
+! 0^p folds to 0 for positive p, ratio exponents included
+{ 0 } [ symbolic[ 0 3/2 ^ ] ] unit-test
+{ 0 } [ symbolic[ 0 1/2 ^ ] ] unit-test
+{ 0 } [ symbolic[ 0 sqrt ] ] unit-test
+{ 1 } [ symbolic[ 0 0 ^ ] ] unit-test
+! Negative powers of 0 are left unevaluated
+{ t } [ symbolic[ 0 -1 ^ ] pow? ] unit-test
+{ t } [ symbolic[ 0 -3/2 ^ ] pow? ] unit-test

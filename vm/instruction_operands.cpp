@@ -54,6 +54,26 @@ void instruction_operand::store_value_masked(fixnum value, cell mask,
   *ptr = (uint32_t)((*ptr & ~mask) | (value >> scaling << lsb & mask));
 }
 
+// Investigation instrumentation (branch investigate/arm64-reloc-bound): track
+// the largest displacement stored into ARM64 B/BL (imm26 << 2, +-128MB) and
+// B.cond/LDR-literal (imm19 << 2, +-1MB) fields.
+static fixnum arm_max_disp[16];
+
+static void note_arm_displacement(int klass, fixnum adjusted, fixnum limit) {
+  fixnum mag = adjusted < 0 ? -adjusted : adjusted;
+  if (mag > arm_max_disp[klass]) {
+    arm_max_disp[klass] = mag;
+    fprintf(stderr,
+            "[arm64-reloc] class %d: new max displacement %ld (0x%lx), field limit 0x%lx%s\n",
+            klass, (long)mag, (long)mag, (long)limit,
+            mag >= limit ? " OUT OF RANGE" : "");
+  } else if (mag >= limit) {
+    fprintf(stderr,
+            "[arm64-reloc] class %d: displacement %ld (0x%lx) OUT OF RANGE, field limit 0x%lx\n",
+            klass, (long)mag, (long)mag, (long)limit);
+  }
+}
+
 void instruction_operand::store_value(fixnum absolute_value) {
   fixnum relative_value = absolute_value - pointer;
 
@@ -74,12 +94,16 @@ void instruction_operand::store_value(fixnum absolute_value) {
       *(int32_t*)(pointer - sizeof(int32_t)) = (int32_t)relative_value;
       break;
     case RC_RELATIVE_ARM_B:
+      note_arm_displacement(RC_RELATIVE_ARM_B, relative_value + 4, 0x8000000);
       FACTOR_ASSERT(relative_value + 4 < 0x8000000);
       FACTOR_ASSERT(relative_value + 4 >= -0x8000000);
       FACTOR_ASSERT((relative_value & 3) == 0);
       store_value_masked(relative_value + 4, rel_arm_b_mask, 0, 2);
       break;
     case RC_RELATIVE_ARM_B_COND_LDR:
+      // TODO(investigation): imm19 << 2 only spans +-0x100000; the asserts
+      // below are 32x too loose. Instrumented, not changed.
+      note_arm_displacement(RC_RELATIVE_ARM_B_COND_LDR, relative_value + 4, 0x100000);
       FACTOR_ASSERT(relative_value + 4 < 0x2000000);
       FACTOR_ASSERT(relative_value + 4 >= -0x2000000);
       FACTOR_ASSERT((relative_value & 3) == 0);

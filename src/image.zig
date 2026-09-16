@@ -506,10 +506,10 @@ pub const ImageLoader = struct {
 
         const total_size = page_size + heap_size;
 
-        // On x86_64 macOS (including under Rosetta), use RWX permissions directly in mmap
-        // Note: MAP_JIT is for Apple Silicon - on x86_64, standard RWX should work
-        const is_arm64 = builtin.cpu.arch == .aarch64;
-        const map_flags: std.c.MAP = if (is_arm64)
+        // MAP_JIT only exists on macOS and is required on Apple Silicon; everywhere
+        // else (including Linux aarch64) a plain RWX anonymous mapping is used.
+        const use_map_jit = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
+        const map_flags: std.c.MAP = if (use_map_jit)
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .JIT = true }
         else
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true };
@@ -559,7 +559,7 @@ pub const ImageLoader = struct {
         // We need to disable write protection before writing to it.
         // IMPORTANT: This must be done BEFORE any writes, including when code_size == 0,
         // because initCodeHeapAllocators will write free blocks to the code heap later.
-        if (is_arm64 and (builtin.os.tag == .macos or builtin.os.tag == .ios)) {
+        if (use_map_jit) {
             const pthread_jit_write_protect_np = struct {
                 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
             }.pthread_jit_write_protect_np;

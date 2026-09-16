@@ -482,6 +482,7 @@ pub const InstructionOperand = struct {
     }
 
     pub fn storeValue(self: *Self, absolute_value: i64) void {
+        noteArmDisplacementFor(self, absolute_value);
         const relative_value = absolute_value - @as(i64, @bitCast(self.pointer));
 
         switch (self.rel.getClass()) {
@@ -515,6 +516,8 @@ pub const InstructionOperand = struct {
             },
             .relative_arm_b_cond_ldr => {
                 const adjusted = relative_value + 4;
+                // TODO(investigation): imm19 << 2 only spans +-0x100000; the
+                // asserts below are 32x too loose. Instrumented, not changed.
                 std.debug.assert(adjusted < 0x2000000);
                 std.debug.assert(adjusted >= -0x2000000);
                 std.debug.assert((adjusted & 3) == 0);
@@ -1035,4 +1038,29 @@ test "relocation entry" {
     try std.testing.expectEqual(RelocationType.entry_point, entry.getType());
     try std.testing.expectEqual(RelocationClass.relative, entry.getClass());
     try std.testing.expectEqual(@as(u24, 0x1234), entry.getOffset());
+}
+
+// --- Investigation instrumentation (branch investigate/arm64-reloc-bound) ---
+// Track the largest displacement stored into ARM64 B/BL (imm26 << 2, +-128MB)
+// and B.cond/LDR-literal (imm19 << 2, +-1MB) fields, printing each new maximum
+// and every value that does not fit its field.
+var arm_max_disp: [16]i64 = [_]i64{0} ** 16;
+
+fn noteArmDisplacementFor(op: *const InstructionOperand, absolute_value: i64) void {
+    const class = op.rel.getClass();
+    const limit: i64 = switch (class) {
+        .relative_arm_b => 0x8000000,
+        .relative_arm_b_cond_ldr => 0x100000,
+        else => return,
+    };
+    const relative_value = absolute_value - @as(i64, @bitCast(op.pointer));
+    const adjusted = relative_value + 4;
+    const mag: i64 = if (adjusted < 0) -adjusted else adjusted;
+    const idx: usize = @intFromEnum(class);
+    if (mag > arm_max_disp[idx]) {
+        arm_max_disp[idx] = mag;
+        std.debug.print("[arm64-reloc] class {d}: new max displacement {d} (0x{x}), field limit 0x{x}{s}\n", .{ idx, mag, mag, limit, if (mag >= limit) " OUT OF RANGE" else "" });
+    } else if (mag >= limit) {
+        std.debug.print("[arm64-reloc] class {d}: displacement {d} (0x{x}) OUT OF RANGE, field limit 0x{x}\n", .{ idx, mag, mag, limit });
+    }
 }

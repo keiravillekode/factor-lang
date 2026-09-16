@@ -1,0 +1,89 @@
+# Investigation only (never merged): measure the ARM64 branch/literal
+# displacements the VM stores while bootstrapping, loading and testing,
+# with both the C++ VM (assertions on) and the Zig VM (Debug).
+name: arm64 relocation investigation
+
+on:
+  push:
+    branches: [ investigate/arm64-reloc-bound ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LOAD_ALL: 'USING: compiler.errors memory namespaces parser.notes syntax vocabs.hierarchy ; parser-quiet? off auto-use? off load-all save compiler-errors get assoc-empty? 0 1 ? exit'
+  STRESS: 'USING: parser words kernel ; "resource:.github/scripts/arm64-reloc-stress.factor" run-file { 2000 10000 30000 50000 70000 } [ "run" "arm64-reloc-stress" lookup-word execute( n -- ) ] each'
+
+jobs:
+  cpp-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+    - name: build C++ VM with assertions
+      run: make -j4 DEBUG=1 linux-arm-64
+    - name: boot image
+      run: ./build.sh update-boot-image && ls -la boot.*.image
+    - name: bootstrap
+      run: ./factor -i=boot.unix-arm.64.image > bootstrap.log 2>&1 || (tail -60 bootstrap.log; exit 1)
+    - name: load-all
+      run: ./factor -e="$LOAD_ALL" > load-all.log 2>&1 || (tail -60 load-all.log; exit 1)
+    - name: test
+      run: ./factor -run=tools.test resource:core compiler threads io > test.log 2>&1 || (tail -60 test.log; exit 1)
+    - name: stress
+      continue-on-error: true
+      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
+    - name: summary
+      if: always()
+      run: |
+        for f in bootstrap.log load-all.log test.log stress.log; do
+          echo "== $f: $(grep -c '\[arm64-reloc\]' "$f" 2>/dev/null || echo 0) reloc lines"
+          grep -h '\[arm64-reloc\]' "$f" 2>/dev/null | grep 'new max' | tail -6
+        done
+        echo "== out of range (all logs):"; grep -h 'OUT OF RANGE' *.log | sort | uniq -c | head
+        echo "== stress output:"; grep -v '\[arm64-reloc\]' stress.log | tail -30
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: cpp-arm64-logs
+        path: '*.log'
+
+  zig-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+    - name: install zig
+      run: |
+        curl -sSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | tar xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
+    - name: build Zig VM (Debug)
+      run: zig version && zig build && ls -la factor
+    - name: zig unit tests
+      run: zig build test --summary all
+    - name: boot image
+      run: ./build.sh update-boot-image && ls -la boot.*.image
+    - name: bootstrap
+      run: ./factor -i=boot.unix-arm.64.image > bootstrap.log 2>&1 || (tail -60 bootstrap.log; exit 1)
+    - name: load-all
+      run: ./factor -e="$LOAD_ALL" > load-all.log 2>&1 || (tail -60 load-all.log; exit 1)
+    - name: test
+      run: ./factor -run=tools.test resource:core compiler threads io > test.log 2>&1 || (tail -60 test.log; exit 1)
+    - name: stress
+      continue-on-error: true
+      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
+    - name: summary
+      if: always()
+      run: |
+        for f in bootstrap.log load-all.log test.log stress.log; do
+          echo "== $f: $(grep -c '\[arm64-reloc\]' "$f" 2>/dev/null || echo 0) reloc lines"
+          grep -h '\[arm64-reloc\]' "$f" 2>/dev/null | grep 'new max' | tail -6
+        done
+        echo "== out of range (all logs):"; grep -h 'OUT OF RANGE' *.log | sort | uniq -c | head
+        echo "== stress output:"; grep -v '\[arm64-reloc\]' stress.log | tail -30
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: zig-arm64-logs
+        path: '*.log'

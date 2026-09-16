@@ -1,6 +1,7 @@
 # Factor investigation notes
 
-Findings from investigating the Factor VM, shared with the Factor team.
+Findings from investigating the Factor VM, and experiments with the
+language, shared with the Factor team.
 
 ## Windows ARM64: faults inside VM primitives are unrecoverable
 
@@ -49,3 +50,17 @@ tests fail. The C++ VM is unaffected.
   `zig-vm-format-float-locale` branch.
 
 **[Read the bug report](zig-vm-format-float-locale.md)**
+
+## Symbolic algebra: an experiment
+
+The `symbolic-algebra` branch adds a computer algebra system in
+`extra/math/symbolic`: symbolic expressions and simplification, derivatives
+and integrals, limits, user-defined rewrite rules, and compilation of an
+expression back into a quotation.
+
+- **Status:** an experiment, not a proposal. Names and syntax may change.
+- **Contents:** what the four vocabularies cover, how to try the branch, and
+  a tutorial of forty-five worked problems whose Factor blocks are all
+  machine-checked against what Factor actually prints.
+
+**[Read the write-up](symbolic-algebra.md)**

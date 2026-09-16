@@ -7,6 +7,9 @@ IN: alien.data.tests
 { -1 } [ -1 c:char <ref> c:char deref ] unit-test
 { -1 } [ -1 c:short <ref> c:short deref ] unit-test
 { -1 } [ -1 c:int <ref> c:int deref ] unit-test
+{ -1 } [ -1 c:longlong <ref> c:longlong deref ] unit-test
+{ -9223372036854775808 } [ -9223372036854775808 c:longlong <ref> c:longlong deref ] unit-test
+{ 9223372036854775807 } [ 9223372036854775807 c:longlong <ref> c:longlong deref ] unit-test
 
 ! I don't care if this throws an error or works, but at least
 ! it should be consistent between platforms

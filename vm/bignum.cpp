@@ -334,8 +334,9 @@ bignum* factor_vm::bignum_remainder(bignum* numerator, bignum* denominator) {
     if (n < (type) 0 && n == (type) -1)                               \
       return (BIGNUM_ONE(1));                                         \
     {                                                                 \
+      /* Negate as unsigned: -n overflows for the most negative n. */ \
       utype accumulator =                                             \
-          ((negative_p = n < (type) 0) ? -n : n);                     \
+          ((negative_p = n < (type) 0) ? (utype)0 - (utype)n : (utype)n); \
       if (accumulator < BIGNUM_RADIX)                                 \
       {                                                               \
         bignum* result = allot_bignum(1, negative_p);                 \

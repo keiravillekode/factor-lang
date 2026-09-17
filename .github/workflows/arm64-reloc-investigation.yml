@@ -18,7 +18,7 @@ env:
 jobs:
   cpp-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
     - uses: actions/checkout@v4
     - name: build C++ VM with assertions
@@ -34,7 +34,7 @@ jobs:
     - name: stress
       if: always()
       continue-on-error: true
-      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
+      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" 2>&1 | tee stress.log | grep -v "new max displacement" | tail -200
     - name: summary
       if: always()
       run: |
@@ -52,7 +52,7 @@ jobs:
 
   zig-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
     - uses: actions/checkout@v4
     - name: install zig
@@ -76,7 +76,7 @@ jobs:
     - name: stress
       if: always()
       continue-on-error: true
-      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" > stress.log 2>&1 || tail -60 stress.log
+      run: ./factor -datastack=16384 -retainstack=16384 -callstack=65536 -e="$STRESS" 2>&1 | tee stress.log | grep -v "new max displacement" | tail -200
     - name: summary
       if: always()
       run: |

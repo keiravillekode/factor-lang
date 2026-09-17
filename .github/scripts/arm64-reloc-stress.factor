@@ -22,12 +22,19 @@ IN: arm64-reloc-stress
     "big" <uninterned-word>
     [ swap ( x -- y ) define-declared ] keep ;
 
-: report ( word quot -- )
+: exact-sum ( n -- float )
+    0 swap [ 2000001/2 + + ] each-integer 1/2 + >float ;
+
+: report ( n word quot -- )
     over "code size: " write word-code swap - .
     [ 0.0 swap execute( x -- y ) ] [ 0.0 swap call( x -- y ) ] bi*
-    2dup = "correct: " write [ . drop ] [ [ . ] bi@ ] if ;
+    pick exact-sum
+    "compiled:    " write pick .
+    "interpreted: " write over .
+    "exact:       " write dup .
+    dup [ = ] curry bi@ and "correct: " write . 2drop ;
 
 : run ( n -- )
     "n = " write dup . flush
-    make-big-quot dup
+    dup make-big-quot dup
     [ [ define-big ] with-compilation-unit ] time swap report flush ;

@@ -12,6 +12,21 @@ IN: tools.profiler.sampling.tests
 
 ! Make sure the profiler doesn't blow up the VM
 { } [ 10 [ [ ] profile ] times ] unit-test
+
+! Recording a sample walks the whole callstack. When that took longer than
+! the sampling interval, the VM re-sampled the same safepoint forever and
+! grew the sample buffer until it ran out of memory. The minor-gc holds
+! execution at the deepest point long enough for a sample to land there.
+: deep-for-profiler ( n -- obj )
+    dup 0 > [ dup 1array swap 1 - deep-for-profiler 2array ] [ drop minor-gc { } ] if ;
+
+{ t } [
+    samples-per-second get-global
+    3001 samples-per-second set-global
+    [ [ 3000 deep-for-profiler drop ] profile ]
+    [ samples-per-second set-global ] bi*
+    raw-profile-data get-global length 1000 <
+] unit-test
 TUPLE: boom ;
 [ 10 [ [ boom new throw ] profile ] times ] [ boom? ] must-fail-with
 

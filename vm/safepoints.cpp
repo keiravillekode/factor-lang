@@ -55,6 +55,15 @@ void factor_vm::handle_safepoint(cell pc) {
     bool prolog_p = block->entry_point() == pc;
 
     record_sample(prolog_p);
+
+    // Recording walks the whole callstack. If that takes longer than the
+    // sampling interval, the timer has already re-armed the safepoint, and
+    // resuming would fault again at this same poll before the program makes
+    // any progress: with a deep enough stack it never gets past it. Disarm
+    // again so execution always reaches the next safepoint; the counts that
+    // arrived meanwhile are recorded there.
+    if (!atomic::load(&safepoint_fep_p))
+      code->set_safepoint_guard(false);
   }
 }
 

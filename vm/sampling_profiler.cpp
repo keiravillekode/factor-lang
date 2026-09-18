@@ -59,11 +59,24 @@ void profiling_sample::clear_counts() volatile {
   atomic::fence();
 }
 
+// Investigation hook (never to be merged): with
+// FACTOR_PROFILER_COMPACT_EVERY=N in the environment, run a compacting
+// collection inside the safepoint handler on every Nth recorded sample.
+// record_sample can already trigger collections by growing the sample
+// buffer; this makes one happen on demand.
+static cell profiler_compact_every = 0;
+static cell profiler_compact_countdown = 0;
+
 // Allocates memory
 void factor_vm::record_sample(bool prolog_p) {
   profiling_sample result = current_sample.record_counts();
   if (result.empty()) {
     return;
+  }
+
+  if (profiler_compact_every != 0 && --profiler_compact_countdown == 0) {
+    profiler_compact_countdown = profiler_compact_every;
+    gc(COLLECT_COMPACT_OP, 0);
   }
   // Appends the callstack, which is just a sequence of quotation or
   // word references, to sample_callstacks.
@@ -103,6 +116,9 @@ void factor_vm::set_profiling(fixnum rate) {
 
 // Allocates memory
 void factor_vm::start_sampling_profiler(fixnum rate) {
+  const char* every = getenv("FACTOR_PROFILER_COMPACT_EVERY");
+  profiler_compact_every = every ? (cell)atol(every) : 0;
+  profiler_compact_countdown = profiler_compact_every;
   special_objects[OBJ_SAMPLE_CALLSTACKS] = tag<array>(allot_growarr());
   samples_per_second = rate;
   current_sample.clear_counts();

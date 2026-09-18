@@ -1,0 +1,52 @@
+# Investigation only (never merged): does a code-compacting collection inside
+# the sampling profiler's safepoint handler leave stale return addresses on
+# arm64? The C++ VM on this branch has a hook, FACTOR_PROFILER_COMPACT_EVERY=N,
+# that compacts on every Nth recorded sample. x86-64 is the control: its
+# signal stub includes the interrupted PC in the callstack walk.
+name: arm64 profiler GC investigation
+
+on:
+  push:
+    branches: [ investigate/arm64-profiler-gc ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN: 'USING: parser words kernel ; "resource:.github/scripts/arm64-profiler-gc.factor" run-file 5 2000000 "main" "arm64-profiler-gc" lookup-word execute( r n -- )'
+
+jobs:
+  cpp:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm, target: linux-arm-64, image: boot.unix-arm.64.image }
+          - { os: ubuntu-24.04,     target: linux-x86-64, image: boot.unix-x86.64.image }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v4
+    - name: build C++ VM
+      run: make -j4 ${{ matrix.target }}
+    - name: boot image
+      run: ./build.sh update-boot-image && ls -la boot.*.image
+    - name: bootstrap
+      run: ./factor -i=${{ matrix.image }} > bootstrap.log 2>&1 || (tail -60 bootstrap.log; exit 1)
+    - name: reproduce
+      run: |
+        for every in 0 5 1; do
+          echo "=== FACTOR_PROFILER_COMPACT_EVERY=$every"
+          start=$(date +%s)
+          FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > run-$every.log 2>&1
+          rc=$?
+          grep -a -E 'moved|sum|rounds ok' run-$every.log | tail -12
+          echo "exit=$rc after $(( $(date +%s) - start ))s"
+          grep -a -m3 -E 'triggered|fatal|Segmentation|Illegal|error' run-$every.log || true
+        done
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: logs-${{ matrix.target }}
+        path: '*.log'

@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  RUN: 'USING: parser words kernel ; "resource:.github/scripts/arm64-profiler-gc.factor" run-file 5 2000000 "main" "arm64-profiler-gc" lookup-word execute( r n -- )'
+  RUN: 'USING: parser words kernel ; "resource:.github/scripts/arm64-profiler-gc.factor" run-file 3 2000000 "main" "arm64-profiler-gc" lookup-word execute( r n -- )'
 
 jobs:
   cpp:
@@ -25,7 +25,7 @@ jobs:
           - { os: ubuntu-24.04-arm, target: linux-arm-64, image: boot.unix-arm.64.image }
           - { os: ubuntu-24.04,     target: linux-x86-64, image: boot.unix-x86.64.image }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
     - uses: actions/checkout@v4
     - name: build C++ VM
@@ -34,19 +34,40 @@ jobs:
       run: ./build.sh update-boot-image && ls -la boot.*.image
     - name: bootstrap
       run: ./factor -i=${{ matrix.image }} > bootstrap.log 2>&1 || (tail -60 bootstrap.log; exit 1)
+    - name: rebuild with assertions and debug info
+      run: |
+        make clean > /dev/null
+        make -j4 DEBUG=1 ${{ matrix.target }}
+    - name: enable core dumps and install gdb
+      run: |
+        sudo sysctl -w kernel.core_pattern=core.%p
+        sudo apt-get install -y -qq gdb > /dev/null
     - name: reproduce
       run: |
-        for every in 0 5 1; do
-          echo "=== FACTOR_PROFILER_COMPACT_EVERY=$every"
-          start=$(date +%s)
-          FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > run-$every.log 2>&1
-          rc=$?
-          grep -a -E 'moved|sum|rounds ok' run-$every.log | tail -12
-          echo "exit=$rc after $(( $(date +%s) - start ))s"
-          grep -a -m3 -E 'triggered|fatal|Segmentation|Illegal|error' run-$every.log || true
+        ulimit -c unlimited
+        for every in 0 5 3 2 1; do
+          for trial in 1 2 3; do
+            log=run-$every-$trial.log
+            echo "=== FACTOR_PROFILER_COMPACT_EVERY=$every trial $trial"
+            start=$(date +%s)
+            FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > $log 2>&1
+            rc=$?
+            grep -a -E 'rounds ok' $log || true
+            echo "exit=$rc after $(( $(date +%s) - start ))s"
+            grep -a -m3 -E 'triggered|fatal|assertion|Segmentation|Illegal' $log || true
+            for core in core.*; do
+              [ -e "$core" ] || continue
+              echo "--- backtrace from $core"
+              gdb -batch -q -ex 'thread apply all bt 40' ./factor "$core" > $log.bt 2>&1
+              grep -a -E '^#|^Thread' $log.bt | head -60
+              rm -f "$core"
+            done
+          done
         done
     - uses: actions/upload-artifact@v4
       if: always()
       with:
         name: logs-${{ matrix.target }}
-        path: '*.log'
+        path: |
+          *.log
+          *.bt

@@ -39,9 +39,12 @@ jobs:
         make clean > /dev/null
         make -j4 DEBUG=1 ${{ matrix.target }}
     - name: enable core dumps and install gdb
+      continue-on-error: true
       run: |
         sudo sysctl -w kernel.core_pattern=core.%p
+        sudo apt-get update -qq > /dev/null
         sudo apt-get install -y -qq gdb > /dev/null
+        gdb --version | head -1
     - name: reproduce
       run: |
         ulimit -c unlimited
@@ -57,9 +60,11 @@ jobs:
             grep -a -m3 -E 'triggered|fatal|assertion|Segmentation|Illegal' $log || true
             for core in core.*; do
               [ -e "$core" ] || continue
-              echo "--- backtrace from $core"
-              gdb -batch -q -ex 'thread apply all bt 40' ./factor "$core" > $log.bt 2>&1
-              grep -a -E '^#|^Thread' $log.bt | head -60
+              echo "--- core $core"
+              if command -v gdb > /dev/null; then
+                gdb -batch -q -ex 'thread apply all bt 40' ./factor "$core" > $log.bt 2>&1
+                grep -a -E '^#|^Thread' $log.bt | head -60
+              fi
               rm -f "$core"
             done
           done

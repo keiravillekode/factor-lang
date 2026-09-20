@@ -53,8 +53,8 @@ jobs:
             log=run-$every-$trial.log
             echo "=== FACTOR_PROFILER_COMPACT_EVERY=$every trial $trial"
             start=$(date +%s)
-            FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > $log 2>&1
-            rc=$?
+            rc=0
+            FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > $log 2>&1 || rc=$?
             grep -a -E 'rounds ok' $log || true
             echo "exit=$rc after $(( $(date +%s) - start ))s"
             grep -a -m3 -E 'triggered|fatal|assertion|Segmentation|Illegal' $log || true

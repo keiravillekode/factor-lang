@@ -1,8 +1,8 @@
 ! Copyright (C) 2009, 2010 Slava Pestov, Joe Groff.
 ! See https://factorcode.org/license.txt for BSD license.
 USING: accessors alien alien.strings assocs combinators
-compiler.errors destructors kernel namespaces sequences strings
-system vocabs ;
+compiler.errors destructors kernel locals namespaces sequences
+strings system vocabs ;
 IN: alien.libraries
 
 PRIMITIVE: dll-valid? ( dll -- ? )
@@ -26,9 +26,29 @@ C: <library> library
 
 : lookup-library ( name -- library/f ) libraries get at ;
 
-: open-dll ( path -- dll dll-error/f )
-    [ dlopen dup dll-valid? [ f ] [ dlerror ] if ]
-    [ f f ] if* ;
+! Set by alien.libraries.finder, which knows how to turn a library
+! name into a path on this system. Left unset during bootstrap and in
+! deployed images, where the retry below simply does not happen.
+SYMBOL: dll-path-resolver
+
+: ?resolve-dll-path ( path -- path'/f )
+    dll-path-resolver get-global
+    [ call( path -- path'/f ) ] [ drop f ] if* ;
+
+: (open-dll) ( path -- dll dll-error/f )
+    dlopen dup dll-valid? [ f ] [ dlerror ] if ;
+
+! A vocabulary that asks for "libfoo.so" only finds it when the
+! development package is installed, because distributions ship just
+! libfoo.so.1 and friends. If the plain name fails, ask the finder.
+:: open-dll ( path -- dll dll-error/f )
+    path [
+        path (open-dll) :> ( dll error )
+        error [
+            path ?resolve-dll-path
+            [ (open-dll) ] [ dll error ] if*
+        ] [ dll error ] if
+    ] [ f f ] if ;
 
 : make-library ( path abi -- library )
     [ dup open-dll ] dip <library> ;

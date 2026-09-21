@@ -1,4 +1,4 @@
-USING: accessors arrays combinators combinators.private io
+USING: accessors arrays combinators combinators.private continuations io
 kernel math math.functions prettyprint sequences stack-checker
 tools.test words ;
 IN: combinators.tests
@@ -8,6 +8,11 @@ IN: combinators.tests
 [ 1 2 [ + ] call( x y -- z a ) ] must-fail
 { 1 2 3 { 1 2 3 4 } } [ 1 2 3 4 [ get-datastack nip ] call( x -- y ) ] unit-test
 [ [ + ] call( x y -- z ) ] must-infer
+
+! #949: fewer values on the stack than the declared inputs
+{ { 1 } } [ { 1 2 } [ [ drop ] call( x y -- z ) ] with-datastack ] unit-test
+[ { 1 } [ [ drop ] call( x y -- z ) ] with-datastack ] [ wrong-values? ] must-fail-with
+[ { } [ [ ] call( x -- y ) ] with-datastack ] [ wrong-values? ] must-fail-with
 
 { 3 } [ 1 2 \ + execute( x y -- z ) ] unit-test
 [ 1 2 \ + execute( -- z ) ] must-fail

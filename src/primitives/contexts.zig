@@ -161,6 +161,14 @@ pub export fn primitive_check_datastack(vm_asm: *VMAssemblyFields) callconv(.c) 
                 return;
             }
 
+            // The quotation's declared inputs must all have been on the
+            // stack before the call. Otherwise it used fewer inputs than
+            // declared, and saved_height - in would be negative (#949).
+            if (saved_height < in) {
+                vm.push(layouts.false_object);
+                return;
+            }
+
             // Compare bottom portion of stack element-by-element
             // We check saved_height - in elements (the preserved portion)
             const ds_bot: [*]Cell = @ptrFromInt(seg.start);

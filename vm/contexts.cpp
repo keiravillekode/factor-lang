@@ -257,7 +257,9 @@ void factor_vm::primitive_check_datastack() {
   fixnum current_height =
       (ctx->datastack - ctx->datastack_seg->start + sizeof(cell)) /
       sizeof(cell);
-  if (current_height - height != saved_height)
+  // saved_height < in means the quotation was called with fewer
+  // inputs than its declared effect requires (#949).
+  if (current_height - height != saved_height || saved_height < in)
     ctx->push(false_object);
   else {
     cell* ds_bot = (cell*)ctx->datastack_seg->start;

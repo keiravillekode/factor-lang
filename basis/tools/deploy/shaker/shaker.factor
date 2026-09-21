@@ -33,6 +33,7 @@ IN: tools.deploy.shaker
 : strip-startup-hooks ( -- )
     "Stripping startup hooks" show
     {
+        "alien.libraries.finder"
         "alien.strings"
         "cpu.x86.features"
         "environment"
@@ -405,6 +406,8 @@ IN: tools.deploy.shaker
             image-path
             current-directory
         } %
+
+        \ alien.libraries:dll-path-resolver ,
 
         "io-thread" "io.thread" lookup-word ,
 

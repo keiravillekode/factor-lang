@@ -93,7 +93,7 @@ jobs:
         curl -sSL https://ziglang.org/download/0.16.0/${{ matrix.zig }}.tar.xz | tar xJ -C "$RUNNER_TEMP"
         echo "$RUNNER_TEMP/${{ matrix.zig }}" >> "$GITHUB_PATH"
     - name: build Zig VM (ReleaseSafe)
-      run: zig version && zig build -Doptimize=ReleaseSafe && ls -la factor
+      run: zig version && zig build -Doptimize=ReleaseSafe -Dkeep_symbols=true && ls -la factor
     - name: boot image
       run: ./build.sh update-boot-image && ls -la boot.*.image
     - name: bootstrap

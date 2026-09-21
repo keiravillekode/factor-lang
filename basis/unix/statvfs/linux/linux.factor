@@ -1,6 +1,7 @@
 ! Copyright (C) 2008 Doug Coleman.
 ! See https://factorcode.org/license.txt for BSD license.
-USING: alien.c-types alien.syntax classes.struct unix.types ;
+USING: alien.c-types alien.libraries alien.syntax classes.struct
+kernel namespaces unix.types ;
 IN: unix.statvfs.linux
 
 STRUCT: statvfs64
@@ -17,7 +18,20 @@ STRUCT: statvfs64
     { f_namemax ulong }
     { __f_spare int[6] } ;
 
-FUNCTION: int statvfs64 ( c-string path, statvfs64* buf )
+! musl does not export statvfs64; its statvfs is already the 64-bit
+! call. glibc needs statvfs64 on 32-bit, where they differ.
+FUNCTION-ALIAS: statvfs64-func int statvfs64 ( c-string path, statvfs64* buf )
+FUNCTION-ALIAS: statvfs-func   int statvfs   ( c-string path, statvfs64* buf )
+
+SYMBOL: statvfs64-available?
+
+: detect-statvfs64 ( -- )
+    "statvfs64" f dlsym? >boolean statvfs64-available? set-global ;
+
+STARTUP-HOOK: [ detect-statvfs64 ]
+
+: (statvfs) ( path buf -- int )
+    statvfs64-available? get-global [ statvfs64-func ] [ statvfs-func ] if ;
 
 CONSTANT: ST_RDONLY 1        ! Mount read-only.
 CONSTANT: ST_NOSUID 2        ! Ignore suid and sgid bits.

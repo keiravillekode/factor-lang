@@ -50,7 +50,8 @@ jobs:
                git config --global --add safe.directory /work
                ./build.sh net-bootstrap
                ./factor -e="USING: compiler.errors memory namespaces parser.notes syntax vocabs.hierarchy ; parser-quiet? off auto-use? off load-all save compiler-errors get assoc-empty? 0 1 ? exit"
-               ./factor -run=tools.test resource:core compiler threads io
+               ./factor -run=tools.test resource:core compiler threads io \
+                   alien.libraries alien.libraries.finder
              '
 
   build-macos-intel:

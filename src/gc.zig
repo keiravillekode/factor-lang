@@ -63,6 +63,12 @@ pub const GarbageCollector = struct {
     }
 
     pub fn gc(self: *Self, op: GCOp) !void {
+        // minorGc, fullGc and the large-object path call this directly
+        // rather than through collect(), so open the guard pages here too.
+        // A nested call is a no-op and only the outermost caller relocks.
+        const guard_unlocked = self.unlockCallstackGuard();
+        defer self.relockCallstackGuard(guard_unlocked);
+
         // The collector writes relocated pointers back into the code heap and
         // callback heap (e.g. callback stub `owner` fields in visitAllRoots).
         // On Apple Silicon those are MAP_JIT and must be made writable for the
@@ -143,25 +149,30 @@ pub const GarbageCollector = struct {
     }
 
     pub fn collect(self: *Self, op: GCOp) void {
+        // Open the guard pages before anything else: syncContextFromRegisters
+        // and the JIT scope below push frames onto the Factor callstack, and
+        // a word that has recursed to the bottom of the segment leaves no
+        // room for them.
+        const unlocked = self.unlockCallstackGuard();
+        defer self.relockCallstackGuard(unlocked);
+
         self.vm.syncContextFromRegisters();
         var jit_scope = jit_protect.Scope.init();
         defer jit_scope.deinit();
 
-        const need_unlock = self.vm.callstackNeedsGuardUnlock() or op == .collect_compact;
-        if (need_unlock) {
-            if (self.vm.vm_asm.ctx.callstack_seg) |seg| {
-                seg.setBorderLocked(false) catch {};
-            }
-        }
-        defer {
-            if (need_unlock) {
-                if (self.vm.vm_asm.ctx.callstack_seg) |seg| {
-                    seg.setBorderLocked(true) catch {};
-                }
-            }
-        }
-
         self.gc(op) catch @panic("GC failed");
+    }
+
+    fn unlockCallstackGuard(self: *Self) bool {
+        const seg = self.vm.vm_asm.ctx.callstack_seg orelse return false;
+        return seg.unlockBorderForGC();
+    }
+
+    fn relockCallstackGuard(self: *Self, unlocked: bool) void {
+        if (!unlocked) return;
+        if (self.vm.vm_asm.ctx.callstack_seg) |seg| {
+            seg.setBorderLocked(true) catch {};
+        }
     }
 
     fn updateSurvivalRate(used: Cell, copied: Cell) f32 {

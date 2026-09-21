@@ -22,6 +22,11 @@ pub const Segment = struct {
     alloc_base: Cell,
     alloc_size: Cell,
 
+    // Whether the guard pages are currently protected. Tracked so that a
+    // nested collection does not relock them while an outer one is still
+    // running.
+    border_locked: bool = true,
+
     // Extra low guard pages for callstack segments. Unlocked during GC to provide
     // stack headroom. The Zig debug build uses substantially more native stack
     pub const low_guard_pages: usize = 64;
@@ -133,7 +138,17 @@ pub const Segment = struct {
     }
 
     // Locks/unlocks ALL low guard pages (alloc_base to start) and the high guard page.
+    // Give the collector room to run on a nearly exhausted callstack by
+    // opening the low guard pages. Returns true when this call is the one
+    // that opened them, so only the outermost caller locks them again.
+    pub fn unlockBorderForGC(self: *Segment) bool {
+        if (!self.border_locked) return false;
+        self.setBorderLocked(false) catch return false;
+        return true;
+    }
+
     pub fn setBorderLocked(self: *Segment, locked: bool) !void {
+        self.border_locked = locked;
         const prot: std.c.PROT = if (locked)
             .{}
         else

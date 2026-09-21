@@ -1,6 +1,6 @@
 USING: arrays assocs byte-arrays calendar continuations io.streams.string
-kernel kernel.private math math.parser math.private memory namespaces parser
-quotations quotations.private random sequences splitting threads
+kernel kernel.private locals math math.parser math.private memory namespaces parser
+quotations quotations.private random sequences splitting system threads
 tools.profiler.sampling tools.profiler.sampling.private
 tools.test ;
 IN: tools.profiler.sampling.tests
@@ -74,6 +74,45 @@ CONSTANT: report-samples {
 ] unit-test
 
 { } [ 10 [ [ ] profile ] times ] unit-test
+
+! The VM records samples inside the safepoint signal handler, where it must
+! not allocate (an allocation can start a GC, and a GC taken while compiled
+! code is stopped at a safepoint is unsafe). So the callstack buffer,
+! OBJ-SAMPLE-CALLSTACKS = { count contents }, is allocated in full when
+! profiling starts, sized for ~10 seconds of samples at ~64 frames each,
+! and entries are dropped once it is full. Both VMs size it the same way.
+: with-sample-rate ( rate quot -- )
+    samples-per-second get-global
+    [ [ samples-per-second set-global ] dip ] dip
+    [ samples-per-second set-global ] curry finally ; inline
+
+: sample-callstacks ( -- count contents )
+    OBJ-SAMPLE-CALLSTACKS special-object first2 ;
+
+{ t t } [
+    97 [ [ 100000 [ 64 f <array> drop ] times ] profile ] with-sample-rate
+    sample-callstacks length
+    [ nip 97 10 * 64 * = ] [ <= ] 2bi
+] unit-test
+
+! When the buffer fills, profiling keeps running, the count stops at the
+! capacity, and every entry that was recorded belongs to exactly one sample
+! (the samples that lost entries just have shorter callstacks). At 997
+! samples/s the capacity is 638,080 entries; 4,000-frame samples fill it in
+! well under a second.
+: deep-frames ( n -- n ) dup 0 = [ drop 1 ] [ 1 - deep-frames 1 + ] if ;
+
+:: run-for-nanos ( nanos quot -- )
+    nano-count :> start
+    [ quot call nano-count start - nanos < ] loop ; inline
+
+{ t t } [
+    997 [
+        [ 1,500,000,000 [ 4000 deep-frames drop ] run-for-nanos ] profile
+    ] with-sample-rate
+    sample-callstacks length over =
+    swap most-recent-profile-data [ sample-callstack length ] map-sum =
+] unit-test
 TUPLE: boom ;
 [ 10 [ [ boom new throw ] profile ] times ] [ boom? ] must-fail-with
 

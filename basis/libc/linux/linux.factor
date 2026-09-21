@@ -1,4 +1,5 @@
-USING: alien.c-types alien.syntax destructors kernel system ;
+USING: alien.c-types alien.strings alien.syntax destructors
+kernel system ;
 IN: libc
 
 LIBRARY: libc
@@ -170,11 +171,17 @@ ALIAS:    SIGPOLL         SIGIO
 CONSTANT: SIGPWR          30
 CONSTANT: SIGSYS          31
 
-FUNCTION: c-string strerror_r ( int errno, char* buf, size_t buflen )
+! glibc's strerror_r is the GNU variant, which returns char*, while
+! musl's is the XSI one, which returns int and fills the buffer. Both
+! export __xpg_strerror_r for the XSI behaviour, so use that and read
+! the buffer, the same way macOS and FreeBSD do.
+FUNCTION-ALIAS: strerror_r
+    int __xpg_strerror_r ( int errno, char* buf, size_t buflen )
 
 M: linux strerror
     [
-        1024 [ malloc &free ] keep strerror_r
+        1024 [ malloc &free ] keep [ strerror_r ] keepd nip
+        alien>native-string
     ] with-destructors ;
 
 CONSTANT: LC_CTYPE           0

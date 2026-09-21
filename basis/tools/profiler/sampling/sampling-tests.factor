@@ -12,6 +12,20 @@ IN: tools.profiler.sampling.tests
 
 ! Make sure the profiler doesn't blow up the VM
 { } [ 10 [ [ ] profile ] times ] unit-test
+
+! The VM allocates the callstack buffer in full when profiling starts and
+! never grows it while recording a sample, because recording runs inside
+! the safepoint handler where a collection is unsafe. The capacity is
+! ~10 seconds of samples at ~64 frames each.
+{ t t } [
+    samples-per-second get-global
+    97 samples-per-second set-global
+    [ [ 100000 [ 64 f <array> drop ] times ] profile ]
+    [ samples-per-second set-global ] bi*
+    OBJ-SAMPLE-CALLSTACKS special-object
+    [ second length 97 640 * = ]
+    [ [ first ] [ second length ] bi <= ] bi
+] unit-test
 TUPLE: boom ;
 [ 10 [ [ boom new throw ] profile ] times ] [ boom? ] must-fail-with
 

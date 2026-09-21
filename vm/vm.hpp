@@ -71,6 +71,8 @@ struct factor_vm {
 
   // Is profiling enabled?
   volatile bool sampling_profiler_p;
+  // callstack entries dropped because the sample buffer was full
+  cell dropped_callstack_entries;
   fixnum samples_per_second;
 
   // Global variables used to pass fault handler state from signal handler
@@ -197,8 +199,8 @@ struct factor_vm {
   void set_profiling(fixnum rate);
   void primitive_set_profiling();
   void primitive_get_samples();
-  array* allot_growarr();
-  void growarr_add(array *growarr_, cell value);
+  array* allot_growarr(cell capacity);
+  void growarr_add(array *growarr, cell value);
 
   // errors
   void general_error(vm_error_type error, cell arg1, cell arg2);

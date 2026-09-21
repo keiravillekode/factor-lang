@@ -10,6 +10,7 @@ factor_vm::factor_vm(THREADHANDLE thread)
       callback_id(0),
       c_to_factor_func(NULL),
       sampling_profiler_p(false),
+      dropped_callstack_entries(0),
       signal_pipe_input(0),
       signal_pipe_output(0),
       current_sample(0, 0, 0, 0, 0),

@@ -36,6 +36,23 @@ jobs:
     - name: help-lint
       run: './factor -run=help.lint resource:core resource:basis resource:extra'
 
+  build-linux-musl:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: bootstrap, load-all and test under musl
+      run: |
+           docker run --rm -v "$PWD":/work -w /work \
+             alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b \
+             sh -euc '
+               apk add --no-cache bash git make gcc g++ libc-dev musl-dev wget \
+                   pango-dev gtk+3.0-dev openssl-dev glu-dev mesa-dev
+               git config --global --add safe.directory /work
+               ./build.sh net-bootstrap
+               ./factor -e="USING: compiler.errors memory namespaces parser.notes syntax vocabs.hierarchy ; parser-quiet? off auto-use? off load-all save compiler-errors get assoc-empty? 0 1 ? exit"
+               ./factor -run=tools.test resource:core compiler threads io
+             '
+
   build-macos-intel:
     runs-on: macos-15-intel
     steps:

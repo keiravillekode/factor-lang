@@ -331,6 +331,23 @@ fn recordSampleImpl(vm: *vm_mod.FactorVM, skip_p: bool, current_owner: ?Cell) vo
     var counts = drainCounters();
     if (counts.sample_count == 0) return;
 
+    // Investigation hook (never to be merged): with
+    // FACTOR_PROFILER_COMPACT_EVERY=N, run a compacting collection inside the
+    // safepoint handler on every Nth recorded sample, the way the C++ VM can
+    // when it grows its sample buffer. The Zig VM never allocates here, so
+    // this is the only way to ask whether its callstack walk would survive.
+    if (compact_every != 0) {
+        compact_countdown -|= 1;
+        if (compact_countdown == 0) {
+            compact_countdown = compact_every;
+            if (vm.gc) |gc_instance| {
+                vm.current_gc_p = true;
+                gc_instance.collect(.collect_compact);
+                vm.current_gc_p = false;
+            }
+        }
+    }
+
     // Get the growarr for callstacks
     var callstacks_cell = vm.specialObject(.sample_callstacks);
     if (callstacks_cell == layouts.false_object or callstacks_cell == 0) return;
@@ -393,7 +410,15 @@ const ITIMER_REAL: c_int = 0;
 extern "c" fn setitimer(which: c_int, new_value: *const itimerval, old_value: ?*itimerval) c_int;
 
 // Start the sampling profiler
+var compact_every: Cell = 0;
+var compact_countdown: Cell = 0;
+
 pub fn startSamplingProfiler(vm: *vm_mod.FactorVM, samples_per_second: Cell) !void {
+    compact_every = blk: {
+        const raw = std.c.getenv("FACTOR_PROFILER_COMPACT_EVERY") orelse break :blk 0;
+        break :blk std.fmt.parseInt(Cell, std.mem.span(raw), 10) catch 0;
+    };
+    compact_countdown = compact_every;
     // Allocate the heap growable array for callstack entries — fully
     // pre-sized so sample recording never allocates (no GC inside the
     // safepoint handler).

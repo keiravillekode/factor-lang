@@ -76,3 +76,62 @@ jobs:
         path: |
           *.log
           *.bt
+
+  zig:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm, zig: zig-aarch64-linux-0.16.0, image: boot.unix-arm.64.image }
+          - { os: ubuntu-24.04,     zig: zig-x86_64-linux-0.16.0,  image: boot.unix-x86.64.image }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+    - uses: actions/checkout@v4
+    - name: install zig
+      run: |
+        curl -sSL https://ziglang.org/download/0.16.0/${{ matrix.zig }}.tar.xz | tar xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/${{ matrix.zig }}" >> "$GITHUB_PATH"
+    - name: build Zig VM (ReleaseSafe)
+      run: zig version && zig build -Doptimize=ReleaseSafe && ls -la factor
+    - name: boot image
+      run: ./build.sh update-boot-image && ls -la boot.*.image
+    - name: bootstrap
+      run: ./factor -i=${{ matrix.image }} > bootstrap.log 2>&1 || (tail -60 bootstrap.log; exit 1)
+    - name: enable core dumps and install gdb
+      continue-on-error: true
+      run: |
+        sudo sysctl -w kernel.core_pattern=core.%p
+        sudo apt-get update -qq > /dev/null
+        sudo apt-get install -y -qq gdb > /dev/null
+    - name: reproduce
+      run: |
+        ulimit -c unlimited
+        for every in 0 5 3 2 1; do
+          for trial in 1 2 3; do
+            log=run-$every-$trial.log
+            echo "=== FACTOR_PROFILER_COMPACT_EVERY=$every trial $trial"
+            start=$(date +%s)
+            rc=0
+            FACTOR_PROFILER_COMPACT_EVERY=$every timeout 1200 ./factor -e="$RUN" > $log 2>&1 || rc=$?
+            grep -a -E 'rounds ok' $log || true
+            echo "exit=$rc after $(( $(date +%s) - start ))s"
+            grep -a -m3 -E 'triggered|fatal|panic|assertion|Segmentation|Illegal' $log || true
+            for core in core.*; do
+              [ -e "$core" ] || continue
+              echo "--- core $core"
+              if command -v gdb > /dev/null; then
+                gdb -batch -q -ex 'thread apply all bt 40' ./factor "$core" > $log.bt 2>&1
+                grep -a -E '^#|^Thread' $log.bt | head -60
+              fi
+              rm -f "$core"
+            done
+          done
+        done
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: logs-zig-${{ matrix.os }}
+        path: |
+          *.log
+          *.bt

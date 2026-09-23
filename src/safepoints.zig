@@ -192,8 +192,17 @@ pub fn handleSafepoint(vm: *vm_mod.FactorVM, pc: Cell) !void {
         recordSample(vm, prolog_p);
     }
 
-    // Disarm again in case SIGALRM re-armed the safepoint during processing.
-    disarmSafepoint(vm) catch {};
+    // The timer may have already re-armed. Avoid immediately sampling again
+    // at the same safepoint.
+    disarmSafepointAfterSample(vm) catch {};
+}
+
+// A debugger interrupt that arrived while the sample was recorded also
+// armed the page; keep it. Check after disarming so the interrupt cannot
+// be lost between the check and the mprotect.
+pub fn disarmSafepointAfterSample(vm: *vm_mod.FactorVM) !void {
+    try disarmSafepoint(vm);
+    if (safepoint_fep_p.load(.monotonic)) try armSafepoint(vm);
 }
 
 // --- Heap-based growable array for sample callstacks ---
@@ -573,4 +582,78 @@ test "safepoint atomic flags" {
     // Verify
     try testing.expect(!safepoint_fep_p.load(.monotonic));
     try testing.expect(!sampling_profiler_p.load(.monotonic));
+}
+
+// Whether the page at `addr` is currently mapped without read/write access,
+// from /proc/self/maps (Linux only).
+fn pageProtectedLinux(addr: usize) !bool {
+    const fd = std.c.open("/proc/self/maps", .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (fd < 0) return error.CannotOpenMaps;
+    defer _ = std.c.close(fd);
+    var buf: [64 * 1024]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        const got = std.c.read(fd, buf[n..].ptr, buf.len - n);
+        if (got <= 0) break;
+        n += @intCast(got);
+    }
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        const range = fields.next() orelse continue;
+        const perms = fields.next() orelse continue;
+        const dash = std.mem.indexOfScalar(u8, range, '-') orelse continue;
+        const start = try std.fmt.parseInt(usize, range[0..dash], 16);
+        const end = try std.fmt.parseInt(usize, range[dash + 1 ..], 16);
+        if (addr >= start and addr < end) return perms[0] == '-' and perms[1] == '-';
+    }
+    return error.PageNotMapped;
+}
+
+// After a sample the safepoint is disarmed so the program makes progress
+// even when recording outlasts the timer interval. A debugger interrupt that
+// arrived meanwhile has armed the same page and must survive the disarm.
+test "disarming after a sample keeps a pending debugger interrupt" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var vm = try vm_mod.FactorVM.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.vm_asm.ctx = try vm.newContext();
+    vm.vm_asm.spare_ctx = try vm.newContext();
+
+    const page_size = segments.page_size;
+    const region = std.c.mmap(null, page_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    if (region == std.c.MAP_FAILED) return error.OutOfMemory;
+    const page_ptr: *align(std.heap.page_size_min) anyopaque = @alignCast(region);
+    defer _ = std.c.munmap(page_ptr, page_size);
+
+    const code_heap = try std.testing.allocator.create(vm_mod.CodeHeap);
+    defer std.testing.allocator.destroy(code_heap);
+    code_heap.* = .{
+        .seg = undefined,
+        .safepoint_page = @intFromPtr(page_ptr),
+        .code_start = @intFromPtr(page_ptr) + page_size,
+        .code_size = 64 * 1024,
+        .remembered_sets = write_barrier.CodeHeapRememberedSets.init(std.testing.allocator),
+    };
+    vm.code = code_heap;
+    defer safepoint_fep_p.store(false, .monotonic);
+    defer sampling_profiler_p.store(false, .monotonic);
+    sampling_profiler_p.store(true, .monotonic);
+    try disarmSafepoint(vm);
+    try testing.expect(!try pageProtectedLinux(code_heap.safepoint_page));
+
+    // A timer tick during the sample re-armed the page: disarm it.
+    try enqueueSamples(vm, 1, 0, true); // foreign-thread tick: no code segment lookup
+    try testing.expect(try pageProtectedLinux(code_heap.safepoint_page));
+    try disarmSafepointAfterSample(vm);
+    try testing.expect(!try pageProtectedLinux(code_heap.safepoint_page));
+
+    // Ctrl-C during the sample: the page must stay armed.
+    try enqueueSamples(vm, 1, 0, true); // foreign-thread tick: no code segment lookup
+    try enqueueFep(vm);
+    try disarmSafepointAfterSample(vm);
+    try testing.expect(try pageProtectedLinux(code_heap.safepoint_page));
+    try testing.expect(safepoint_fep_p.load(.monotonic));
+    try disarmSafepoint(vm);
 }
